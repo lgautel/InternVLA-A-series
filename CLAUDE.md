@@ -121,3 +121,25 @@ This skips WAN video loading and uses the low-latency action-only path.
 ### Git Submodules
 
 - `third_party/RoboTwin` — RoboTwin simulation platform (used for evaluation).
+
+# 介绍
+
+- 这是论文[InternVLA-A1.5: Unifying Understanding, Latent Foresight, and Action for Compositional Generalization](https://arxiv.org/abs/2607.04988)的代码库, 论文的html版在 https://arxiv.org/html/2607.04988v1 , 论文的本地pdf版在`b/d/p/InternVLA-A1.5.pdf`, 论文的本地md版在`b/d/p/InternVLA-A1.5-paper.md`, 
+- 论文的项目主页在 https://internrobotics.github.io/internvla-a15.github.io/ , 
+- 论文的GitHUb在 https://github.com/InternRobotics/InternVLA-A-series ,
+- 论文的模型权重在 https://huggingface.co/InternRobotics/InternVLA-A1.5-base 
+
+
+# 设计/方案/分析/解释和写文档的注意点
+
+* 图表用mermaid, 数学相关的用LaTex, 必要时可以用py脚本画一些更能帮助读者理解的图片(图片中的文字用英文). 这些脚本和图一般放在与生成的文档同目录的`asset`子文件夹中.
+* 如果在公式和内容中用到了数学符号或代号, 请在该公式或内容的附近对该符号给予解释.
+* 分析,解析和撰写文档时, 可以参考论文或代码库的官网, 官方文档, GItHUb, 参考github中的issues, 代码和pull requests, 也可参考网上其它可信来源的相关文章, 但参考内容要列出, 所生产的文档中若有与被参考对象相关的内容也要指出内容的出处. 
+* 分析要深入仔细, 既要包括纵向分析(算法或方法的由来与演进历史, 以及在该算法或方法的基础上又演进和优化出了些什么解决类似问题的方法, 新老方法各有什么优缺点, 各适合应用到什么场景), 纵向分析(同时期同类算法的对比分析, 不同算法或方法各有什么优缺点, 各适合应用到什么场景), 和 消融分析(算法或方法中哪些点是在benchmark实验或实践中被证明有效的, 哪些点相对来说更有效, 哪些没那么有效).
+* 记得深入分析模型或方法的输入,输出,在输入输出间做了些什么处理. 当然, 各组成模块的输入输出以及中间的处理也要分析. 为了训这个模型用了什么数据集和任务, 训出来后能做什么任务, 训练和推理时的输入输出数据格式大概长什么样.
+* 系统或程序的设计要包括静态架构(组件图,类图,组件和类的职责与关系等等)和动态架构(数据流图,序列图,工作流图,不同场景下的各组件或类的调用与协调图.如果是算法还会涉及forward阶段的数据流,模型组件间的调用,以及backwawrd阶段的数据流,gradient流,哪些权重冻结哪些会被更新,和模型组件间的调用等等).
+* 代码还是以该代码库的本地代码为准, 但可用参考网上GitHub的issues, commits, pull requests等.
+* 解释要深入浅出, 图文并茂, 可以举一些易于理解的例子帮助说明, 对关键的逻辑也要进行深入的代码解读, 要用严谨的科普论文的风格.
+
+# 开发规范
+- 数据下载到 `/mnt/r/DATA/`, 权重或checkpoint下载到`/mnt/r/CKPT/`, python虚拟环境安装在`/mnt/r/VENV/`.
