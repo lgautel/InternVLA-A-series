@@ -140,6 +140,3 @@ This skips WAN video loading and uses the low-latency action-only path.
 * 系统或程序的设计要包括静态架构(组件图,类图,组件和类的职责与关系等等)和动态架构(数据流图,序列图,工作流图,不同场景下的各组件或类的调用与协调图.如果是算法还会涉及forward阶段的数据流,模型组件间的调用,以及backwawrd阶段的数据流,gradient流,哪些权重冻结哪些会被更新,和模型组件间的调用等等).
 * 代码还是以该代码库的本地代码为准, 但可用参考网上GitHub的issues, commits, pull requests等.
 * 解释要深入浅出, 图文并茂, 可以举一些易于理解的例子帮助说明, 对关键的逻辑也要进行深入的代码解读, 要用严谨的科普论文的风格.
-
-# 开发规范
-- 数据下载到 `/mnt/r/DATA/`, 权重或checkpoint下载到`/mnt/r/CKPT/`, python虚拟环境安装在`/mnt/r/VENV/`.

@@ -1,0 +1,10 @@
+\section{Conclusion}\vspace{-1em}
+We presented ELAN4D, a training framework that
+improves VLA policies with embodiment-centric 4D supervision. ELAN4D uses
+future robot keypoint tracks as a compact 4D signal and injects this supervision through a ControlNet-style action branch with a lightweight track decoder. This design encourages the action expert to learn 4D-aware representations while preserving the base policy interface.
+Experiments on LIBERO, LIBERO-Plus, RoboTwin2.0, and real-world manipulation tasks show that
+ELAN4D consistently improves strong VLA baselines, with especially clear gains under out-of-distribution perturbations. These results suggest that embodiment-centric 4D supervision is a simple yet effective method for improving VLA policy.\vspace{-1em}
+
+\section{Limitations}\vspace{-1em}
+
+ELAN4D makes a deliberate trade-off: it uses robot keypoint tracks as 4D supervision that is cheap to obtain, but it does not directly supervise whole-scene dynamics. As a result, sparse robot keypoint tracks may be insufficient for tasks where success depends primarily on external object motion, deformable objects, or complex contacts beyond the robot's own motion. Nevertheless, our results show that this lightweight embodiment-centric signal already provides a strong and deployment-friendly training objective, improving VLA robustness with negligible preprocessing cost.
