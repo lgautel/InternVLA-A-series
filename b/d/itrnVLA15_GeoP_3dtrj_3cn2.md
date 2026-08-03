@@ -24,10 +24,11 @@
 12. [梯度流分析](#12-梯度流分析)
 13. [推理路径设计](#13-推理路径设计)
 14. [配置变更](#14-配置变更)
-15. [代码修改指南](#15-代码修改指南)
-16. [v2 vs v3.1 对比总结](#16-v2-vs-v31-对比总结)
-17. [参考文献](#17-参考文献)
-18. [分步实施方案](#18-分步实施方案)
+15. [3D 关键点数据处理管道](#15-3d-关键点数据处理管道)
+16. [代码修改指南](#16-代码修改指南)
+17. [v2 vs v3.1 对比总结](#17-v2-vs-v31-对比总结)
+18. [参考文献](#18-参考文献)
+19. [分步实施方案](#19-分步实施方案)
 
 附录 A: [Token 位置速查表](#附录-a-token-位置速查表)
 附录 B: [GeoPredict Checkpoint Key 映射表](#附录-b-geopredict-checkpoint-key-映射表)
@@ -1330,9 +1331,9 @@ sequenceDiagram
 
 ```python
 def forward(self, ...,
-            his_kpts=None, his_len=None,        # 新增: 历史关键点轨迹
-            kpt_t=None, future_kpts=None,        # 新增: 当前/未来关键点 GT
-            kpt_mask=None,                        # 新增: per-sample 有效性掩码
+            his_kpts=None, his_len=None,        # 新增: 历史关键点轨迹（来源见 §15）
+            kpt_t=None, future_kpts=None,        # 新增: 当前/未来关键点 GT（来源见 §15）
+            kpt_mask=None,                        # 新增: per-sample 有效性掩码（来源见 §15.8）
             ...):
 
     # 步骤 1: 流匹配噪声（不变）
@@ -1914,9 +1915,34 @@ keypoint_track_query_dim: int = 512
 keypoint_track_num_heads: int = 8
 keypoint_track_ff_dim: int = 1024
 keypoint_history_max_len: int = 1000
+
+# 数据增强（见 §15.6）
+keypoint_noise_sigma: float = 0.0             # 训练时加性高斯噪声 sigma（0=不加）
 ```
 
-> **新增字段总计 27 个**（原先 17 个 + 新增 10 个）。新增的 10 个字段：`action_loss_weight`, `kpt_future_loss_weight`, `ki_gradient_scale`, `ki_kpt_gradient_scale`, `vlm_lr_scale`, `action_expert_lr_scale`, `kpt_expert_lr_scale`, `track_encoder_lr_scale`（8 个全新）+ `action_loss_weight` 替代硬编码 + `kpt_future_loss_weight` 细粒度 kpt loss 控制。
+> **新增字段总计 28 个**（原先 17 个 + 新增 11 个）。
+
+#### `keypoint_3d_delta_indices` 计算属性
+
+新增 config property，驱动 `resolve_delta_timestamps` 为关键点构建 1051 帧的时序查询窗口（详见 [§15.3](#153-关键点时序查询delta_timestamps-集成)）：
+
+```python
+@property
+def keypoint_3d_delta_indices(self) -> list[int] | None:
+    """返回关键点时序查询的 delta 索引列表。
+
+    生成 [-H+1, ..., 0, ..., +C] 共 H+1+C 个索引，
+    由 resolve_delta_timestamps 转换为秒级 delta_timestamps
+    传递给 __getitem__，一次性查询历史+当前+未来帧。
+    """
+    if not self.enable_keypoint_predictor:
+        return None
+    H = self.keypoint_history_max_len  # 1000
+    C = self.chunk_size                # 50
+    return list(range(-H + 1, C + 1))  # 1051 indices: [-999, ..., 0, ..., 50]
+```
+
+> 此属性**不是字段**（无 `@dataclass` 默认值），不计入字段总数。它由 `factory.py:resolve_delta_timestamps` 在创建数据集时调用。
 
 ### 14.2 KeypointExpertConfig 类
 
@@ -2090,25 +2116,715 @@ track_encoder_lr_scale: 2.0
 
 ---
 
-## 15. 代码修改指南
+## 15. 3D 关键点数据处理管道
 
-### 15.1 新增文件
+> **本章解决的核心问题**：v3.1 方案中 3D 关键点数据从何而来、如何存储、如何在 LeRobot 变换管道中处理、以及如何在训练和推理时送入模型。这是连接"磁盘上的原始数据"与"model.forward() 的输入参数"的完整桥梁。
+
+### 15.1 数据来源与关键点定义
+
+#### 15.1.1 关键点选择
+
+GeoPredict 定义了 **8 个 3D 关键点**，对应机器人运动链上的关键身体部位：
+
+| 序号 | MuJoCo body 名 | 物理含义 |
+|:----:|:---|:---|
+| 1 | `robot0_link1` | 肩部旋转关节 |
+| 2 | `robot0_link2` | 肩部俯仰关节 |
+| 3 | `robot0_link3` | 上臂旋转关节 |
+| 4 | `robot0_link4` | 肘部关节 |
+| 5 | `robot0_link5` | 前臂旋转关节 |
+| 6 | `robot0_link6` | 腕部俯仰关节 |
+| 7 | `robot0_link7` | 腕部旋转关节 |
+| 8 | `gripper0_right_eef` | 末端执行器（夹爪） |
+
+这 8 个点覆盖了从肩部到末端的完整运动链，提供了机器人臂的 3D 几何骨架表征。每个关键点的值为 3D 坐标 $(x, y, z)$，共 $8 \times 3 = 24$ 个标量。
+
+#### 15.1.2 坐标系定义
+
+关键点使用**机器人基座相对坐标系**（robot-base-relative frame），而非世界坐标系或相机坐标系：
+
+$$\mathbf{p}_{rel} = \mathbf{R}_{base}^T \cdot (\mathbf{p}_{world} - \mathbf{t}_{base}) - \mathbf{t}_{offset}$$
+
+其中：
+- $\mathbf{p}_{world}$：关节在世界坐标系中的位置（MuJoCo `get_body_xpos()` 返回值）
+- $\mathbf{R}_{base}$：机器人基座的旋转矩阵，$\mathbf{t}_{base}$：基座的世界坐标位置
+- $\mathbf{t}_{offset} = [-0.5, -0.8, 0.0]$：固定平移偏移，用于将坐标中心化
+
+使用基座相对坐标的好处：
+1. **隔离基座运动**：对于移动机器人，关节相对于基座的位置不随基座移动而改变
+2. **有界范围**：臂展范围有限，坐标自然有界（典型值在 $[-1.5, 1.5]$ 米内）
+3. **跨场景一致性**：不同场景中相同姿态产生相同的关键点坐标
+
+#### 15.1.3 模拟器提取（训练数据生成）
+
+在 RoboCasa 模拟环境中，关键点通过 MuJoCo 物理引擎直接获取（参考 [`GeoPredict/tools/test_robocasa.py:180-194`](../../GeoPredict/tools/test_robocasa.py#L180-L194)）：
+
+```python
+def get_keypoints(env, body_pos, body_rot):
+    """从 MuJoCo 模拟器提取 8 个机器人关键点的 3D 坐标。
+    
+    Args:
+        env: RoboCasa 环境实例（含 env.sim MuJoCo 仿真器）
+        body_pos: 机器人基座世界坐标位置 [3]
+        body_rot: 机器人基座旋转矩阵 [3, 3]
+    Returns:
+        keypoints: [8, 3] 基座相对坐标系下的关键点位置
+    """
+    ori_trans = np.array([-0.5, -0.8, -0.0], dtype=np.float32)
+    keypoint = None
+    for j in range(1, 9):
+        pos_name = "gripper0_right_eef" if j == 8 else f"robot0_link{j}"
+        pos = env.sim.data.get_body_xpos(pos_name)     # 世界坐标 [3]
+        pos = body_rot.T @ (pos - body_pos)              # → 基座相对坐标
+        pos = pos - ori_trans                             # → 中心化
+        if keypoint is None:
+            keypoint = pos.copy()
+        else:
+            keypoint = np.concatenate([keypoint, pos])
+    return keypoint.reshape(8, 3)
+```
+
+在数据采集阶段，每个 episode 的每一步都调用此函数，结果保存为 `keypoints.npy`（shape `[step_num, 24]`，8×3 展平）。
+
+#### 15.1.4 真实机器人来源（正向运动学）
+
+对于真实机器人部署，没有 MuJoCo 模拟器可用。此时通过**正向运动学**（Forward Kinematics, FK）从关节角度计算各关节位置：
+
+```python
+def get_keypoints_from_fk(joint_positions, robot_urdf_path, base_pos, base_rot, ori_trans):
+    """通过正向运动学计算 8 个关键点的 3D 坐标。
+    
+    Args:
+        joint_positions: [7] 关节角度（弧度）
+        robot_urdf_path: 机器人 URDF 模型路径
+        base_pos: 基座世界坐标位置 [3]
+        base_rot: 基座旋转矩阵 [3, 3]
+        ori_trans: 坐标偏移 [3]，默认 [-0.5, -0.8, 0.0]
+    Returns:
+        keypoints: [8, 3] 基座相对坐标
+    """
+    import pinocchio as pin
+    
+    model = pin.buildModelFromUrdf(robot_urdf_path)
+    data = model.createData()
+    q = np.zeros(model.nq)
+    q[:7] = joint_positions
+    pin.forwardKinematics(model, data, q)
+    
+    keypoints = np.zeros((8, 3), dtype=np.float32)
+    link_names = [f"robot0_link{j}" for j in range(1, 8)] + ["gripper0_right_eef"]
+    for i, name in enumerate(link_names):
+        frame_id = model.getFrameId(name)
+        pin.updateFramePlacement(model, data, frame_id)
+        world_pos = data.oMf[frame_id].translation
+        keypoints[i] = base_rot.T @ (world_pos - base_pos) - ori_trans
+    
+    return keypoints
+```
+
+> **注意**：FK 的精度依赖于准确的 URDF 模型和关节编码器标定。训练数据（来自模拟器精确值）和推理数据（来自 FK）之间的系统性偏差会影响预测质量。
+
+### 15.2 LeRobot 数据集格式扩展
+
+#### 15.2.1 新增 Parquet 列
+
+在 LeRobot 数据集的 parquet 文件中新增一列：
+
+```
+observation.keypoint_3d    dtype: float32    shape: [24]
+```
+
+与 `observation.state`（也是展平的 1D 向量）遵循相同的存储约定。每帧存储 $8 \times 3 = 24$ 个浮点数，按关键点序号展平：`[link1_x, link1_y, link1_z, link2_x, ..., eef_z]`。
+
+> **为什么用展平的 `[24]` 而非 `[8, 3]`？** LeRobot 的 parquet 约定将非图像特征存储为 1D 向量。Reshape 到 `[8, 3]` 在变换阶段进行（§15.4）。
+
+#### 15.2.2 info.json features 条目
+
+数据集的 `meta/info.json` 中需要添加特征声明：
+
+```json
+{
+  "features": {
+    "observation.keypoint_3d": {
+      "dtype": "float32",
+      "shape": [24],
+      "names": [
+        "link1_x", "link1_y", "link1_z",
+        "link2_x", "link2_y", "link2_z",
+        "link3_x", "link3_y", "link3_z",
+        "link4_x", "link4_y", "link4_z",
+        "link5_x", "link5_y", "link5_z",
+        "link6_x", "link6_y", "link6_z",
+        "link7_x", "link7_y", "link7_z",
+        "eef_x", "eef_y", "eef_z"
+      ]
+    }
+  }
+}
+```
+
+#### 15.2.3 从 GeoPredict 原始格式转换
+
+将 GeoPredict 的 `keypoints.npy` 转换为 LeRobot parquet 列：
+
+```python
+import numpy as np
+import pandas as pd
+
+keypoints = np.load("episode_dir/keypoints.npy")  # [step_num, 24]
+# 直接作为 float32 列写入 parquet dataframe
+df["observation.keypoint_3d"] = [row.tolist() for row in keypoints.astype(np.float32)]
+```
+
+对于没有关键点数据的数据集，不添加此列。跨数据集兼容性通过变换层的 feature guard 处理（§15.8）。
+
+### 15.3 关键点时序查询：`delta_timestamps` 集成
+
+#### 15.3.1 设计挑战
+
+GeoPredict 的 `RobocasaDataset.__getitem__`（[`data_processing/robocasa_dataset.py:79-104`](../../GeoPredict/data_processing/robocasa_dataset.py#L79-L104)）直接加载整个 episode 的 `keypoints.npy` 并按索引切分历史和未来。但在 LeRobot 框架中，**变换只能看到单个样本的 DataDict**，无法直接访问 episode 级数据。
+
+解决方案：利用 LeRobot 已有的 **`delta_timestamps` 机制**在 `__getitem__` 阶段预取时序窗口。当为某个特征 key 配置了 `delta_timestamps` 后，`LeRobotDataset.__getitem__`（[`lerobot_dataset.py:930-940`](src/lerobot/datasets/lerobot_dataset.py#L930-L940)）会自动：
+1. 查询每个 delta 对应帧的特征值，堆叠为 `[num_deltas, feature_dim]`
+2. 生成 `{key}_is_pad` 布尔掩码，标记超出 episode 边界的帧
+
+#### 15.3.2 新增 config property
+
+在 `InternVLAA15Config`（[`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py)）中新增：
+
+```python
+@property
+def keypoint_3d_delta_indices(self) -> list[int] | None:
+    """返回关键点时序查询的帧偏移量列表。
+    
+    生成 H+1+C 个索引：
+    - 历史: [-H+1, -H+2, ..., -1, 0)  共 H 个（delta=-999到-1，不含当前帧）
+    - 当前: [0]                         共 1 个
+    - 未来: [1, 2, ..., C]              共 C 个
+    
+    总计 H+1+C = 1000+1+50 = 1051 个索引。
+    """
+    if not self.enable_keypoint_predictor:
+        return None
+    H = self.keypoint_history_max_len  # 1000
+    C = self.chunk_size                # 50
+    return list(range(-H + 1, C + 1))  # 1051 indices: [-999, ..., 0, ..., 50]
+```
+
+#### 15.3.3 `resolve_delta_timestamps` 扩展
+
+在 [`datasets/factory.py`](src/lerobot/datasets/factory.py) 的 `resolve_delta_timestamps` 函数（line 281-321）中新增处理分支：
+
+```python
+def resolve_delta_timestamps(cfg, ds_meta):
+    delta_timestamps = {}
+    # ... 现有逻辑 ...
+    
+    for key in ds_meta.features:
+        # ... 现有的 REWARD, ACTION, OBS, image 处理 ...
+        
+        # 新增: 3D 关键点时序查询
+        if (key == "observation.keypoint_3d"
+            and hasattr(cfg, "keypoint_3d_delta_indices")
+            and cfg.keypoint_3d_delta_indices is not None):
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.keypoint_3d_delta_indices]
+    
+    return delta_timestamps if delta_timestamps else None
+```
+
+#### 15.3.4 索引算术图解
+
+对于 `keypoint_history_max_len=1000`，`chunk_size=50`，在 episode 的第 `step` 帧：
+
+```
+delta_indices: [-999, -998, ..., -1, 0, +1, +2, ..., +50]
+                 |<---- 1000 个历史 ---->|cur|<-- 50 个未来 -->|
+                 
+stacked 结果索引:  [0]   [1]  ... [999] [1000] [1001] ... [1050]
+                   ↓     ↓         ↓      ↓      ↓          ↓
+对应 episode 帧: step-999 step-998  step-1 step  step+1   step+50
+                  (可能   (可能     (有效) (有效) (有效    (可能
+                   被clamp) 被clamp)                       被clamp)
+```
+
+**越界处理**：`__getitem__` 将超出 episode 边界的帧 clamp 到 `[ep_start, ep_end-1]`，并在 `_is_pad` 中标记为 `True`。变换阶段（§15.4）将 padded 位置的关键点置零。
+
+#### 15.3.5 效率分析
+
+| 指标 | 值 | 说明 |
+|:-----|:---|:-----|
+| 每样本查询帧数 | 1051 | H + 1 + C |
+| 每帧数据量 | 96 字节 | 24 × float32 |
+| 每样本总 I/O | ~101 KB | 1051 × 96 bytes |
+| 相对于图像 I/O | 极小 | 3 张 224×224 RGB ≈ 441 KB |
+
+Parquet 的列式存储和 OS 页缓存使得这些查询开销可忽略。对于短 episode（如 200 帧），大部分历史索引会被 clamp 到 `ep_start`，但这不影响正确性——is_pad 标记确保这些帧被零化。
+
+> **配置建议**：对于 episode 长度一致较短的数据集（如平均 200 帧），可将 `keypoint_history_max_len` 减小到 200 以降低 parquet 查询开销。TrackEncoder 的 `his_len` 参数自动适配可变长度历史。
+
+### 15.4 `Extract3DKeypointTransformFn` 完整实现
+
+#### 15.4.1 在变换链中的位置
+
+插入在 Step 5（`NormalizeTransformFn`）之后、Step 6（`ComposeFieldsTransform`）之前：
+
+```
+ 1. DeltaActionTransformFn
+ 2. ResizeImagesWithPadFn
+ 3. RemapImageKeyTransformFn
+ 4. ExtractVideoFramesTransformFn
+ 5. NormalizeTransformFn        ← 归一化 state/action，不处理 keypoint
+ ┌─────────────────────────────────────────────────┐
+ │ 5.5 Extract3DKeypointTransformFn  ◄── 新增      │
+ │     从 [1051, 24] 时序堆叠中拆分                 │
+ │     history / current / future                   │
+ └─────────────────────────────────────────────────┘
+ 6. ComposeFieldsTransform
+ 7. FASTInternVLAA15ActionTokenizerTransformFn
+ 8. LoadActionTextFromJsonlTransformFn
+ 9. InternVLAA15ChatProcessorTransformFn
+10. PadStateAndActionTransformFn
+11. ReorderStateActionTransform
+12. UnifyInternVLAA15InputsTransformFn  ← 更新：传递 kpt 字段
+```
+
+**为什么放在 NormalizeTransformFn 之后？** `NormalizeTransformFn.hydrate()` 读取 `schema.get_state_keys() + schema.get_action_keys()` 确定需要归一化的 key。`observation.keypoint_3d` 不属于 state 或 action key，因此不会被归一化——这正是我们想要的行为（§15.5）。
+
+#### 15.4.2 完整实现代码
+
+```python
+@DataTransformFn.register_subclass("extract_3d_keypoint")
+@dataclass
+class Extract3DKeypointTransformFn(DataTransformFn):
+    """从 delta_timestamps 查询得到的时序堆叠中提取 3D 关键点历史、当前帧和未来轨迹。
+
+    前置条件：
+    - 数据集含 'observation.keypoint_3d' 特征时，__getitem__ 已通过 delta_timestamps 产生
+      shape [H+1+C, J*3] 的堆叠张量和 [H+1+C] 的 _is_pad 掩码
+    - 数据集不含该特征时，产生零填充 + kpt_mask=False
+
+    输出字段：
+    - observation.his_kpts:   [H, J, 3]   零填充历史 buffer
+    - observation.his_len:    scalar long  有效历史帧数
+    - observation.kpt_t:      [J, 3]      当前帧关键点
+    - observation.kpt_future: [C, J, 3]   未来关键点轨迹目标
+    - observation.kpt_mask:   scalar bool  True=此样本有有效关键点数据
+    """
+    num_joints: int = 8
+    history_max_len: int = 1000
+    chunk_size: int = 50
+
+    _has_keypoints: bool = field(default=True, init=False, repr=False)
+
+    def hydrate(self, dataset):
+        from dataclasses import replace
+        has_kpt = "observation.keypoint_3d" in dataset.meta.features
+        obj = replace(self, _has_keypoints=has_kpt)
+        return obj
+
+    def __call__(self, data):
+        import torch
+
+        J = self.num_joints          # 8
+        H = self.history_max_len     # 1000
+        C = self.chunk_size          # 50
+
+        kpt_key = "observation.keypoint_3d"
+        pad_key = f"{kpt_key}_is_pad"
+
+        if not self._has_keypoints or kpt_key not in data:
+            data["observation.his_kpts"]   = torch.zeros(H, J, 3)
+            data["observation.his_len"]    = torch.tensor(0, dtype=torch.long)
+            data["observation.kpt_t"]      = torch.zeros(J, 3)
+            data["observation.kpt_future"] = torch.zeros(C, J, 3)
+            data["observation.kpt_mask"]   = torch.tensor(False)
+            return data
+
+        # ---- 从时序堆叠中拆分 ----
+        raw = data.pop(kpt_key)       # [H+1+C, J*3] = [1051, 24]
+        is_pad = data.pop(pad_key)    # [H+1+C] = [1051] bool
+
+        all_kpts = raw.reshape(-1, J, 3)  # [1051, 8, 3]
+
+        # 历史: 索引 [0, H) 对应 delta [-H+1, 0)
+        his_raw = all_kpts[:H]        # [1000, 8, 3]
+        his_pad = is_pad[:H]          # [1000] bool
+
+        his_kpts = his_raw.clone()
+        his_kpts[his_pad] = 0.0       # 越界帧置零（与 GeoPredict 零填充约定一致）
+
+        # his_len: 有效（非 padded）帧数
+        valid_mask = ~his_pad
+        if valid_mask.any():
+            his_len = valid_mask.long().sum()
+        else:
+            his_len = torch.tensor(1, dtype=torch.long)
+
+        # 当前帧: 索引 H 对应 delta=0
+        kpt_t = all_kpts[H]           # [8, 3]
+
+        # 未来轨迹: 索引 [H+1, H+1+C) 对应 delta [1, C]
+        future_kpts = all_kpts[H + 1 : H + 1 + C]  # [50, 8, 3]
+
+        data["observation.his_kpts"]   = his_kpts       # [1000, 8, 3]
+        data["observation.his_len"]    = his_len         # scalar long
+        data["observation.kpt_t"]      = kpt_t           # [8, 3]
+        data["observation.kpt_future"] = future_kpts     # [50, 8, 3]
+        data["observation.kpt_mask"]   = torch.tensor(True)
+
+        return data
+```
+
+#### 15.4.3 索引拆分详解
+
+```
+stacked tensor: [1051, 24]
+
+index:    0    1    2   ...  999  1000  1001 1002  ... 1050
+delta: -999 -998 -997  ...   -1     0    +1   +2  ...  +50
+         ↓                    ↓     ↓     ↓              ↓
+split: |<----- history ------>| cur |<----- future ----->|
+       all_kpts[:1000]         [1000] all_kpts[1001:1051]
+       → his_kpts [1000,8,3]  → kpt_t [8,3]  → future_kpts [50,8,3]
+```
+
+**边界情况处理**：
+- **Episode 开头**（step=0）：history 全部 is_pad=True → `his_kpts` 全零，`his_len=1`（GeoPredict 约定）
+- **Episode 末尾**（step=last）：future 部分帧 is_pad=True → 这些帧的 `future_kpts` 值是 clamped 到最后一帧的重复值（与 GeoPredict `max(0, min(step_num-1, step+1+delta))` 一致）
+- **无关键点数据集**：`_has_keypoints=False` → 所有输出全零，`kpt_mask=False`
+
+### 15.5 归一化决策分析
+
+#### 15.5.1 GeoPredict 的做法
+
+GeoPredict 对不同数据类型的归一化策略（参考 [`data_processing/robocasa_dataset.py:68-104`](../../GeoPredict/data_processing/robocasa_dataset.py#L68-L104)）：
+
+| 数据类型 | 归一化方式 | 参考代码行 |
+|:---------|:----------|:----------|
+| `state`（机器人状态） | z-score：`(x - mean) / (std + 1e-6)` | lines 68-70 |
+| `actions`（动作） | z-score：`(x - mean) / (std + 1e-6)` | lines 72-75 |
+| `keypoints`（3D 关键点） | **无归一化，直接使用原始坐标** | lines 79-104 |
+| `images`（RGB 图像） | `[0,1]` → `[-1,1]`：`x * 2 - 1` | `utils.py:37` |
+
+#### 15.5.2 不归一化的理由
+
+| 考量 | 分析 |
+|:-----|:-----|
+| GeoPredict 已验证 | 原始坐标在 GeoPredict 训练中表现良好，无需修改 |
+| 自然有界 | 基座相对坐标受臂展限制，典型范围 $[-1.5, 1.5]$ 米 |
+| 物理可解释性 | 原始坐标保持米为单位，便于调试和可视化 |
+| 管道简化 | 无需计算/存储/应用关键点归一化统计量 |
+| 推理一致性 | 推理时 FK/MuJoCo 输出直接使用，无需反归一化 |
+| Loss 控制 | `kpt_loss_weight`（§11.3）已提供 loss 幅度的显式控制 |
+
+#### 15.5.3 推荐
+
+**v3.1 默认不归一化关键点**。`NormalizeTransformFn` 仅作用于 `get_state_keys() + get_action_keys()` 返回的 key，而 `observation.keypoint_3d` 不属于这两者，因此自动跳过。
+
+如果未来需要跨机器人归一化（不同机器人有不同的工作空间尺寸），可以在数据集的 `stats` 中添加 `observation.keypoint_3d` 的统计量，并扩展 `NormalizeTransformFn` 的 `selected_keys` 列表。但这不在 v3.1 初始范围内。
+
+### 15.6 数据增强策略
+
+#### 15.6.1 GeoPredict 的做法
+
+GeoPredict 对关键点**不做任何数据增强**。仅对图像应用 ColorJitter（brightness=0.3, contrast=0.4, saturation=0.5），参考 [`data_processing/utils.py:12-40`](../../GeoPredict/data_processing/utils.py#L12-L40)。
+
+#### 15.6.2 可选增强策略分析
+
+| 策略 | 可行性 | 推荐 | 说明 |
+|:-----|:------:|:----:|:-----|
+| 加性高斯噪声 | ✓ | 可选 | 模拟 FK 误差或传感器噪声，sigma 需极小（< 0.01m） |
+| 关节随机 dropout | ✓ | 不默认 | 随机置零部分关节，增强鲁棒性，但改变数据分布 |
+| 空间变换（旋转/平移/缩放） | ✗ | **不实现** | 必须同步变换图像、深度、相机参数，需统一空间增强框架 |
+| 时序子采样 | ✗ | 不需要 | TrackEncoder 的 `his_len` 机制已自然处理变长历史 |
+| 坐标系扰动 | ✗ | 不推荐 | 扰动 `body_pos`/`body_rot` 需联动多个数据源 |
+
+#### 15.6.3 推荐
+
+**默认不增强关键点**。关键点是从机器人物理状态导出的几何量，独立增强可能创造物理上不可能的配置（如关节位置超出关节限制）。
+
+提供可选的加性噪声开关：
+
+```python
+# InternVLAA15Config 中新增
+keypoint_noise_sigma: float = 0.0  # 训练时加性高斯噪声 sigma（0=不加）
+```
+
+在 `Extract3DKeypointTransformFn.__call__` 中（训练时）：
+
+```python
+if self.noise_sigma > 0 and self.training:
+    kpt_t = kpt_t + torch.randn_like(kpt_t) * self.noise_sigma
+    # 注意：不对 his_kpts 加噪，因为历史是已观测的"事实"
+```
+
+### 15.7 `UnifyInternVLAA15InputsTransformFn` 更新
+
+`UnifyInternVLAA15InputsTransformFn`（[`configuration_internvla_a1_5.py:105-151`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py#L105-L151)）作为变换链的最后一步，充当字段过滤器——只有它输出的 key 才会进入 DataLoader。需要更新以传递关键点字段。
+
+#### 15.7.1 Robot 样本的 Unify 更新
+
+```python
+def __call__(self, data: DataDict) -> DataDict:
+    # ... 现有代码（构建 result dict）...
+
+    # v3.1: 传递关键点字段（如存在）
+    kpt_fields = [
+        "observation.his_kpts",      # [H, J, 3]
+        "observation.his_len",       # scalar long
+        "observation.kpt_t",         # [J, 3]
+        "observation.kpt_future",    # [C, J, 3]
+        "observation.kpt_mask",      # scalar bool
+    ]
+    for kf in kpt_fields:
+        if kf in data:
+            result[kf] = data[kf]
+
+    return result
+```
+
+#### 15.7.2 VQA 样本的 Unify 更新
+
+`UnifyInternVLAA15VQAInputsTransformFn`（line 153-194）处理纯文本 VQA 样本。VQA 样本没有关键点数据，但必须与 robot 样本有相同的 key 集合才能在同一 batch 中 collate：
+
+```python
+def __call__(self, data: DataDict) -> DataDict:
+    # ... 现有代码 ...
+    
+    # v3.1: VQA 样本添加零填充关键点（kpt_mask=False）
+    import torch
+    H, J, C = 1000, 8, 50  # 与 config 保持一致
+    result["observation.his_kpts"]   = torch.zeros(H, J, 3)
+    result["observation.his_len"]    = torch.tensor(0, dtype=torch.long)
+    result["observation.kpt_t"]      = torch.zeros(J, 3)
+    result["observation.kpt_future"] = torch.zeros(C, J, 3)
+    result["observation.kpt_mask"]   = torch.tensor(False)
+
+    return result
+```
+
+> **`kpt_mask=False`** 确保这些零填充值不参与关键点损失计算（§10.4 中的 per-sample masking）。
+
+### 15.8 跨数据集兼容性
+
+#### 15.8.1 问题
+
+`MultiLeRobotDataset` 在多数据集训练时取所有数据集特征的**交集**。如果 Dataset A 有 `observation.keypoint_3d` 但 Dataset B 没有，该特征会被放入 `disabled_features` 从所有样本中移除。关键点管道会静默失效。
+
+#### 15.8.2 两级掩码解决方案
+
+```mermaid
+flowchart TD
+    D1[Dataset A<br/>有 keypoint_3d] -->|hydrate| T1["Extract3DKeypointTransformFn<br/>_has_keypoints = True"]
+    D2[Dataset B<br/>无 keypoint_3d] -->|hydrate| T2["Extract3DKeypointTransformFn<br/>_has_keypoints = False"]
+    
+    T1 -->|"__call__"| O1["his_kpts=[real data]<br/>kpt_mask=True"]
+    T2 -->|"__call__"| O2["his_kpts=[zeros]<br/>kpt_mask=False"]
+    
+    O1 --> Batch
+    O2 --> Batch
+    
+    Batch --> Forward["model.forward()"]
+    Forward --> Mask{"kpt_mask<br/>per-sample"}
+    Mask -->|True| Loss["计算 L_kpt"]
+    Mask -->|False| Skip["跳过 kpt loss"]
+```
+
+**第一级：Feature-level guard**（变换层）
+
+`Extract3DKeypointTransformFn.hydrate()` 检查 `"observation.keypoint_3d" in dataset.meta.features`。当特征不存在时，`_has_keypoints=False`，变换产生零填充 + `kpt_mask=False`。
+
+这使得变换**安全地包含在所有数据集的变换链中**——即使数据集没有关键点数据也不会报错。
+
+**第二级：Per-sample kpt_mask**（模型层）
+
+在 `InternVLAA15.forward()`（当前文档 §10.4）中，已有 per-sample 掩码逻辑：
+
+```python
+if self.config.enable_keypoint_predictor and kpt_t is not None:
+    if kpt_mask is not None and not kpt_mask.all():
+        kpt_t       = kpt_t[kpt_mask]
+        future_kpts = future_kpts[kpt_mask]
+        # 仅对有效样本计算 kpt loss
+```
+
+#### 15.8.3 有效 Batch Size 注意事项
+
+当混合训练中仅有一小部分数据集包含关键点数据时，每个 batch 中 `kpt_mask=True` 的样本数可能很少。这意味着关键点 loss 的有效 batch size 小于总 batch size，可能导致梯度估计噪声较大。
+
+如需补偿，可将 `kpt_loss_weight` 按 $1 / f_{kpt}$ 缩放（其中 $f_{kpt}$ 是含关键点数据的样本比例），使关键点梯度的期望幅度与全部样本可用时相同。
+
+### 15.9 推理时关键点数据流
+
+推理时没有 LeRobot 数据集和变换链。关键点数据实时获取并逐帧累积。
+
+#### 15.9.1 模拟器路径（RoboCasa）
+
+参考 GeoPredict 推理流程（[`tools/test_robocasa.py:232-304`](../../GeoPredict/tools/test_robocasa.py#L232-L304)）：
+
+```python
+# 初始化
+H = config.keypoint_history_max_len  # 1000
+J = config.num_keypoint_joints       # 8
+his_kpts = np.zeros((H, J, 3), dtype=np.float32)
+his_len = 0
+
+# 每步循环
+for step in range(max_steps):
+    obs = env.step(action)
+    
+    # 1. 提取当前帧关键点
+    kpt_t = get_keypoints(env, body_pos, body_rot)  # [8, 3]
+    
+    # 2. 追加到历史 buffer
+    if his_len < H:
+        his_kpts[his_len] = kpt_t
+    else:
+        his_kpts = np.roll(his_kpts, -1, axis=0)  # 左移一位
+        his_kpts[-1] = kpt_t
+    his_len = min(his_len + 1, H)
+    
+    # 3. 送入模型（每 replan_steps 步重新规划一次）
+    if need_replan:
+        his_kpts_tensor = torch.from_numpy(his_kpts).unsqueeze(0)  # [1, H, J, 3]
+        his_len_tensor = torch.tensor([his_len], dtype=torch.long)  # [1]
+        
+        actions = model.infer(
+            state=state_tensor,
+            pixel_values=pixel_values,
+            his_kpts=his_kpts_tensor,
+            his_len=his_len_tensor,
+            ...
+        )
+```
+
+#### 15.9.2 真实机器人路径
+
+```python
+# 每步循环
+joint_positions = robot_api.get_joint_positions()  # [7] 弧度
+kpt_t = get_keypoints_from_fk(
+    joint_positions, urdf_path, base_pos, base_rot, ori_trans
+)
+# 后续历史累积和模型调用与模拟器路径相同
+```
+
+#### 15.9.3 与推理代码的集成路径
+
+```
+InternVLAA15Policy.select_action(observation_batch)
+    └── 从 observation_batch 提取 his_kpts, his_len
+    └── model.infer(state, pixel_values, his_kpts, his_len, ...)
+        └── embed_kpt_suffix(state, his_kpts, his_len)
+            ├── kpt_state_proj(state) → [B, 1, 1024]
+            ├── TrackEncoder(his_kpts, his_len) → [B, J, 1024]
+            └── keypoint_embedding → [B, J, 1024]
+            → kpt_embs [B, 17, 1024]
+```
+
+> **关键细节**：`ori_trans` 偏移量必须与训练数据完全一致。不同机器人类型可能使用不同的 `ori_trans`，应存储在数据集元数据或 config 中，而非硬编码。
+
+### 15.10 Collation 与 DataLoader 兼容性
+
+所有关键点张量由 `Extract3DKeypointTransformFn` 输出为**固定 shape**（历史已零填充到 `keypoint_history_max_len`），PyTorch 的 `default_collate` 可直接堆叠：
+
+| 字段 | 样本 Shape | Batch Shape | 是否固定 |
+|:-----|:----------|:-----------|:-------:|
+| `observation.his_kpts` | `[1000, 8, 3]` | `[B, 1000, 8, 3]` | ✓ |
+| `observation.his_len` | `[]` (scalar) | `[B]` | ✓ |
+| `observation.kpt_t` | `[8, 3]` | `[B, 8, 3]` | ✓ |
+| `observation.kpt_future` | `[50, 8, 3]` | `[B, 50, 8, 3]` | ✓ |
+| `observation.kpt_mask` | `[]` (scalar) | `[B]` | ✓ |
+
+**无需自定义 collate 函数**。这与 `observation.pixel_values`（需要 concat 而非 stack 的变长张量）不同——关键点数据的固定 shape 设计刻意避免了此复杂性。
+
+**内存开销分析**：
+
+| 组件 | 每样本大小 | Batch=32 大小 | 占比 |
+|:-----|:----------|:------------|:----:|
+| `his_kpts` [1000,8,3] float32 | 96 KB | 3 MB | 小 |
+| `kpt_future` [50,8,3] float32 | 4.8 KB | 154 KB | 极小 |
+| 对比：3 张 RGB 图像 [3,224,224] | 588 KB | 18.8 MB | 基准 |
+| 对比：video_frames [5,3,224,224] | 980 KB | 31.4 MB | 基准 |
+
+关键点数据的内存开销远小于图像数据，不构成瓶颈。
+
+### 15.11 完整端到端数据流图
+
+```mermaid
+flowchart TD
+    subgraph Disk["磁盘 (LeRobot 格式)"]
+        PQ["parquet 文件<br/>observation.keypoint_3d: [24] per frame<br/>observation.state: [8] per frame<br/>action: [12] per frame"]
+        IMG["video/image 文件<br/>observation.images.*"]
+    end
+
+    subgraph GetItem["LeRobotDataset.__getitem__(idx)"]
+        DT["delta_timestamps 解析"]
+        DT -->|"action: [0,...,49]"| ACT_S["action → [50, 32]"]
+        DT -->|"keypoint_3d: [-999,...,50]"| KPT_S["keypoint_3d → [1051, 24]<br/>+ _is_pad → [1051]"]
+        DT -->|"images: [0,12,25,37,50]"| IMG_S["images → [5, 3, H, W]"]
+    end
+
+    subgraph Chain["Transform Chain (12+1 步)"]
+        T1["1. DeltaAction (optional)"]
+        T2["2. ResizeImages (224×224)"]
+        T3["3. RemapImageKey"]
+        T4["4. ExtractVideoFrames"]
+        T5["5. Normalize (state/action only)"]
+        T55["<b>5.5 Extract3DKeypoint</b> ◄ NEW<br/>拆分: history [1000,8,3]<br/>current [8,3], future [50,8,3]<br/>计算 his_len, kpt_mask"]
+        T6["6-11. ComposeFields → ... → ReorderState"]
+        T12["<b>12. UnifyInputs</b> ◄ UPDATED<br/>传递 5 个 kpt 字段"]
+        
+        T1 --> T2 --> T3 --> T4 --> T5 --> T55 --> T6 --> T12
+    end
+
+    subgraph DL["DataLoader (default_collate)"]
+        Batch["Batch:<br/>his_kpts [B,1000,8,3]<br/>his_len [B]<br/>kpt_t [B,8,3]<br/>kpt_future [B,50,8,3]<br/>kpt_mask [B]<br/>state [B,32], action [B,50,32]<br/>pixel_values, input_ids, ..."]
+    end
+
+    subgraph Model["InternVLAA15.forward()"]
+        EKS["embed_kpt_suffix(state, his_kpts, his_len)"]
+        EKS --> TE["TrackEncoder(his_kpts, his_len)<br/>→ [B, 8, 1024]"]
+        EKS --> KSP["kpt_state_proj(state)<br/>→ [B, 1, 1024]"]
+        EKS --> KE["keypoint_embedding<br/>→ [B, 8, 1024]"]
+        TE --> CONCAT["concat → kpt_embs [B, 17, 1024]"]
+        KSP --> CONCAT
+        KE --> CONCAT
+        
+        CONCAT --> MOT["24 层 3-path MoT"]
+        MOT --> KOUT["kpt_out [:, -8:]<br/>→ keypoint_out_proj<br/>→ pred [B, 8, 3]"]
+        
+        KOUT --> LOSS["MSE losses (masked by kpt_mask):<br/>L_kpt_cur = MSE(pred, kpt_t)<br/>L_kpt_fut = MSE(fut_pred, kpt_future)"]
+    end
+
+    Disk --> GetItem
+    GetItem --> Chain
+    Chain --> DL
+    DL --> Model
+```
+
+---
+
+## 16. 代码修改指南
+
+### 16.1 新增文件
 
 | 文件 | 内容 |
 |---|---|
 | `src/lerobot/policies/internvla_a1_5/keypoints.py` | 从 GeoPredict 移植 TrackEncoder（`output_dim=1024`）。包含 `PointPatchEmbedding`, `CrossAttentionBlock`, `TrackEncoder`, `get_1d_sincos_pos_embed`, `load_geopredict_track_encoder_weights`。 |
 
-### 15.2 需修改的文件
+### 16.2 需修改的文件
 
 | 文件 | 修改内容 |
 |---|---|
 | [`modeling_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) | **(1)** `compute_layer_complete`（L119-335）：2 → 3 路径。**(2)** 新增 `compute_layer_suffix_only`。**(3)** `InternVLAA15WithExpertModel.__init__`（L360-412）：新增 `self.keypoint_expert`。**(4)** `InternVLAA15WithExpertModel.forward`（L435-536）：4 种 dispatch。**(5)** `InternVLAA15.__init__`（L539-638）：新增 TrackEncoder 等模块。**(6)** 新增 `embed_kpt_suffix`, `post_init_keypoint_weights` 方法。**(7)** `forward`（L1099-1246）：新增 kpt 参数和损失；loss 合成使用 `action_loss_weight` / `kpt_future_loss_weight` 替代硬编码。**(8)** `denoise_step`：三路径掩码。**(9)** `sample_actions`：传入 kpt 参数。**(10)** `set_requires_grad`：kpt 冻结逻辑。**(11)** `InternVLAA15Policy.get_optim_params`：重写为 per-module LR 分组（见 §14.3）。 |
 | [`pretrained.py`](src/lerobot/policies/pretrained.py) | `InternVLAA15Policy` override `_load_as_safetensor`：加载后调用 `post_init_keypoint_weights` 和可选的 GeoPredict 权重加载。 |
-| [`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | 添加 27 个新配置字段（含 2 个 v3.1 新增的初始化控制字段）。 |
-| [`transform_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) | 新增 `Extract3DKeypointTransformFn`。 |
+| [`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | 添加 28 个新配置字段（含 2 个 v3.1 新增的初始化控制字段）。 |
+| [`transform_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) | 新增 `Extract3DKeypointTransformFn`（完整设计见 §15.4）。 |
+| [`factory.py`](src/lerobot/datasets/factory.py) | `resolve_delta_timestamps` 新增 `observation.keypoint_3d` 处理分支（见 §15.3）。 |
 | [`lerobot_train.py`](src/lerobot/scripts/lerobot_train.py) | 新增 `loss_kpt_current`, `loss_kpt_future` 指标。 |
 
-### 15.3 不需修改的代码
+### 16.3 不需修改的代码
 
 | 代码 | 原因 |
 |---|---|
@@ -2118,7 +2834,7 @@ track_encoder_lr_scale: 2.0
 | `_compute_fast_token_mask` | 仅作用于 prefix |
 | `get_position_ids` | 仅处理 prefix |
 
-### 15.4 `InternVLAA15WithExpertModel.forward` dispatch 设计
+### 16.4 `InternVLAA15WithExpertModel.forward` dispatch 设计
 
 ```python
 def forward(self, ..., inputs_embeds, ...):
@@ -2159,7 +2875,7 @@ def forward(self, ..., inputs_embeds, ...):
 
 ---
 
-## 16. v2 vs v3.1 对比总结
+## 17. v2 vs v3.1 对比总结
 
 | 设计维度 | v2（kpt 在 action suffix 中） | v3.1（独立 kpt 路径 + 权重热启动） |
 |---|---|---|
@@ -2196,7 +2912,7 @@ def forward(self, ..., inputs_embeds, ...):
 
 ---
 
-## 17. 参考文献
+## 18. 参考文献
 
 1. **InternVLA-A1.5**: Zhu et al., "InternVLA-A1.5: Unifying Understanding, Latent Foresight, and Action for Compositional Generalization," 2025. [arXiv:2607.04988](https://arxiv.org/abs/2607.04988)
 
@@ -2224,7 +2940,7 @@ def forward(self, ..., inputs_embeds, ...):
 
 ---
 
-## 18. 分步实施方案
+## 19. 分步实施方案
 
 本章将 v3.1 三路径 MoT 融合方案拆分为 **9 个可独立测试的实施步骤**（Step 0-7 + Step 3.5）。每步包含：
 
@@ -2234,14 +2950,14 @@ def forward(self, ..., inputs_embeds, ...):
 - **单元测试代码**（含完整 fixture 和 assert，可直接运行）
 - **验收命令**
 
-### 18.0 实施前提
+### 19.0 实施前提
 
 1. **项目当前无 pytest 测试**：仅有 `tests/openloop_internvla_a1_5.py`（集成脚本，需真实 checkpoint）。Step 0 将建立 pytest 基础设施。
 2. **模型构建依赖 HuggingFace 下载**：`InternVLAA15WithExpertModel.__init__` 会下载 Qwen3.5-2B (~4GB)。所有单元测试使用 **tiny 配置**（4 层，小维度），CPU-only，单个 test <1 秒。
 3. **依赖顺序**：每步依赖前面步骤的代码已合并，但不需要重跑前步测试。
 4. **每步可独立 commit**：完成一步就提交，方便 code review。
 
-### 18.1 实施步骤总览
+### 19.1 实施步骤总览
 
 ```mermaid
 graph LR
@@ -2297,7 +3013,7 @@ graph LR
 |---|---|---|
 | **新建** | `tests/conftest.py` | 共享 fixture: tiny Qwen3.5 配置、tiny expert 工厂 |
 | **修改** | `pyproject.toml` | 添加 `[tool.pytest.ini_options]` |
-| **修改** | `src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py` | 添加 27 个新配置字段（含 v3.1 新增的 `init_kpt_expert_from_action`, `geopredict_checkpoint_path`） |
+| **修改** | `src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py` | 添加 28 个新配置字段（含 v3.1 新增的 `init_kpt_expert_from_action`, `geopredict_checkpoint_path`） |
 | **新建** | `tests/test_step0_config.py` | 配置字段单元测试 |
 
 #### 核心代码变更
@@ -2356,9 +3072,12 @@ keypoint_track_query_dim: int = 512
 keypoint_track_num_heads: int = 8
 keypoint_track_ff_dim: int = 1024
 keypoint_history_max_len: int = 1000
+
+# 数据增强（见 §15.6）
+keypoint_noise_sigma: float = 0.0             # 训练时加性高斯噪声 sigma（0=不加）
 ```
 
-> **配置字段总计 27 个**（原先 17 个 + 新增 10 个）。新增字段详见 §14.1 说明。
+> **配置字段总计 28 个**（原先 17 个 + 新增 11 个）。新增字段详见 §14.1 说明。
 
 **`tests/conftest.py` — 共享 fixture：**
 
@@ -3722,7 +4441,9 @@ v3.1 额外增加了 `_load_as_safetensor` override 集成。
 
 | 操作 | 文件 | 说明 |
 |---|---|---|
-| **修改** | `transform_internvla_a1_5.py` | 新增 `Extract3DKeypointTransformFn`；`UnifyInternVLAA15InputsTransformFn` 新增 kpt 字段 |
+| **修改** | `transform_internvla_a1_5.py` | 新增 `Extract3DKeypointTransformFn`（见 [§15.4](#154-extract3dkeypointtransformfn-完整实现)）；`UnifyInternVLAA15InputsTransformFn` 新增 kpt 字段 |
+| **修改** | `configuration_internvla_a1_5.py` | 变换链插入 `extract_3d_keypoint` 步骤（见 [§15.4.1](#1541-在变换链中的位置)） |
+| **修改** | `factory.py` | `resolve_delta_timestamps` 扩展 `keypoint_3d_delta_indices` 支持（见 [§15.3](#153-关键点时序查询delta_timestamps-集成)） |
 | **修改** | `lerobot_train.py` | `train_metrics` 新增 `loss_kpt_current`, `loss_kpt_future` |
 | **修改** | `modeling_internvla_a1_5.py` | `set_requires_grad` 新增 `freeze_keypoint_modules` 逻辑 |
 | **修改** | `pretrained.py` | `InternVLAA15Policy` override `_load_as_safetensor`（见[第 5.4 节](#54-调用时机override-_load_as_safetensor)） |
@@ -3733,20 +4454,89 @@ v3.1 额外增加了 `_load_as_safetensor` override 集成。
 
 **`transform_internvla_a1_5.py` — 新增 `Extract3DKeypointTransformFn`：**
 
-```python
-class Extract3DKeypointTransformFn(DataTransformFn):
-    """从数据集提取 3D 关键点轨迹历史和目标。
+> 完整设计分析见 [§15.4](#154-extract3dkeypointtransformfn-完整实现)，此处为实施代码。
 
-    输入 data 中需要：
-    - observation.keypoint_3d: [T, J, 3] 关键点 3D 坐标
-    输出添加：
-    - observation.his_kpts: [hist_len, J, 3] 历史轨迹
-    - observation.his_len: [1] 有效历史长度
-    - observation.kpt_current: [J, 3] 当前关键点位置
-    - observation.kpt_future: [chunk_size, J, 3] 未来关键点轨迹
-    - observation.kpt_mask: [1] bool 是否有有效关键点数据
+```python
+@DataTransformFn.register_subclass("extract_3d_keypoint")
+@dataclass
+class Extract3DKeypointTransformFn(DataTransformFn):
+    """从 delta_timestamps 查询得到的时序堆叠中提取 3D 关键点历史、当前帧和未来轨迹。
+
+    前置条件：
+    - 数据集含 'observation.keypoint_3d' 特征时，__getitem__ 已通过 delta_timestamps 产生
+      shape [H+1+C, J*3] 的堆叠张量和 [H+1+C] 的 _is_pad 掩码
+    - 数据集不含该特征时，产生零填充 + kpt_mask=False
+
+    输出字段：
+    - observation.his_kpts:   [H, J, 3]   零填充历史 buffer
+    - observation.his_len:    scalar long  有效历史帧数
+    - observation.kpt_t:      [J, 3]      当前帧关键点
+    - observation.kpt_future: [C, J, 3]   未来关键点轨迹目标
+    - observation.kpt_mask:   scalar bool  True=此样本有有效关键点数据
     """
-    pass  # 详细实现略
+    num_joints: int = 8
+    history_max_len: int = 1000
+    chunk_size: int = 50
+
+    _has_keypoints: bool = field(default=True, init=False, repr=False)
+
+    def hydrate(self, dataset):
+        from dataclasses import replace
+        has_kpt = "observation.keypoint_3d" in dataset.meta.features
+        obj = replace(self, _has_keypoints=has_kpt)
+        return obj
+
+    def __call__(self, data):
+        import torch
+
+        J = self.num_joints          # 8
+        H = self.history_max_len     # 1000
+        C = self.chunk_size          # 50
+
+        kpt_key = "observation.keypoint_3d"
+        pad_key = f"{kpt_key}_is_pad"
+
+        if not self._has_keypoints or kpt_key not in data:
+            data["observation.his_kpts"]   = torch.zeros(H, J, 3)
+            data["observation.his_len"]    = torch.tensor(0, dtype=torch.long)
+            data["observation.kpt_t"]      = torch.zeros(J, 3)
+            data["observation.kpt_future"] = torch.zeros(C, J, 3)
+            data["observation.kpt_mask"]   = torch.tensor(False)
+            return data
+
+        # ---- 从时序堆叠中拆分 ----
+        raw = data.pop(kpt_key)       # [H+1+C, J*3] = [1051, 24]
+        is_pad = data.pop(pad_key)    # [H+1+C] = [1051] bool
+
+        all_kpts = raw.reshape(-1, J, 3)  # [1051, 8, 3]
+
+        # 历史: 索引 [0, H) 对应 delta [-H+1, 0)
+        his_raw = all_kpts[:H]        # [1000, 8, 3]
+        his_pad = is_pad[:H]          # [1000] bool
+
+        his_kpts = his_raw.clone()
+        his_kpts[his_pad] = 0.0       # 越界帧置零（与 GeoPredict 零填充约定一致）
+
+        # his_len: 有效（非 padded）帧数
+        valid_mask = ~his_pad
+        if valid_mask.any():
+            his_len = valid_mask.long().sum()
+        else:
+            his_len = torch.tensor(1, dtype=torch.long)
+
+        # 当前帧: 索引 H 对应 delta=0
+        kpt_t = all_kpts[H]           # [8, 3]
+
+        # 未来轨迹: 索引 [H+1, H+1+C) 对应 delta [1, C]
+        future_kpts = all_kpts[H + 1 : H + 1 + C]  # [50, 8, 3]
+
+        data["observation.his_kpts"]   = his_kpts       # [1000, 8, 3]
+        data["observation.his_len"]    = his_len         # scalar long
+        data["observation.kpt_t"]      = kpt_t           # [8, 3]
+        data["observation.kpt_future"] = future_kpts     # [50, 8, 3]
+        data["observation.kpt_mask"]   = torch.tensor(True)
+
+        return data
 ```
 
 **`lerobot_train.py` — 新增 metrics：**
@@ -3966,7 +4756,7 @@ bash tests/acceptance_v31_smoke.sh
 
 ---
 
-### 18.9 实施风险与缓解
+### 19.9 实施风险与缓解
 
 | 风险 | 影响 | 缓解措施 |
 |---|---|---|
@@ -3980,7 +4770,7 @@ bash tests/acceptance_v31_smoke.sh
 | `post_init_keypoint_weights` 在非 `from_pretrained` 路径中不被调用 | 随机初始化训练 | `__init__` 中增加警告日志（v3.1 新增） |
 | GeoPredict checkpoint 文件路径错误 | 加载失败 | 配置文件验证 + 友好错误提示（v3.1 新增） |
 
-### 18.10 实施顺序建议
+### 19.10 实施顺序建议
 
 **推荐的 git 分支策略**：
 
@@ -4000,7 +4790,7 @@ main
 
 Step 1 和 Step 2 可并行开发。Step 5 和 Step 6 也可并行（都只依赖 Step 4）。
 
-### 18.11 最终验收脚本
+### 19.11 最终验收脚本
 
 ```bash
 #!/usr/bin/env bash
