@@ -478,13 +478,14 @@ sequenceDiagram
     
     Note over Ctor: cls(config) 创建模型实例
     Ctor->>Ctor: VLM = Qwen3_5ForConditionalGeneration.from_pretrained("Qwen3.5-2B")
+    Note over Ctor: ⚠ 构造函数无条件下载 HF 权重（原始代码设计，见下方说明）
     Ctor->>Ctor: action_expert = Qwen3_5TextModel(random init)
     Ctor->>Ctor: keypoint_expert = Qwen3_5TextModel(random init)
     Ctor->>Ctor: TrackEncoder(random init), kpt_state_proj, kpt_embedding, kpt_out_proj
     
-    Note over Ckpt: load_model_as_safetensor(model, model.safetensors, strict=False)
-    Ckpt->>Ckpt: VLM ← checkpoint 权重（覆盖 HF 下载）
-    Ckpt->>Ckpt: action_expert ← checkpoint 权重（覆盖随机初始化）
+    Note over Ckpt: _load_as_safetensor(model, model.safetensors, strict=False)
+    Ckpt->>Ckpt: VLM ← InternVLA-A1.5 checkpoint 权重（覆盖 Stage 1 的 HF 权重）
+    Ckpt->>Ckpt: action_expert ← InternVLA-A1.5 checkpoint 权重（覆盖随机初始化）
     Ckpt->>Ckpt: keypoint_expert: 无匹配 key → 仍为随机 ⚠
     Ckpt->>Ckpt: kpt 附属模块: 无匹配 key → 仍为随机 ⚠
     
@@ -496,6 +497,14 @@ sequenceDiagram
     Geo->>Geo: load_geopredict_track_encoder_weights(track_encoder, path)
     Note over Geo: 仅加载 queries, point_patch_embed, cross_attention_block,<br/>linear_transform, final_norm<br/>跳过 track_fusion_layer（dim 不匹配）
 ```
+
+> **关于 Stage 1 为何出现 `from_pretrained("Qwen3.5-2B")`**：
+>
+> 这是原始 InternVLA-A1.5 代码（[`modeling_internvla_a1_5.py:372`](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L372)）的设计惯性——构造函数（`__init__`）无条件调用 `Qwen3_5ForConditionalGeneration.from_pretrained(config.vlm_model_name_or_path)` 下载 HuggingFace 上的原始 Qwen3.5-2B 权重。然后 `from_pretrained` 流程（[`pretrained.py:107-125`](src/lerobot/policies/pretrained.py#L107-L125)）会立即用 InternVLA-A1.5 checkpoint 的 `model.safetensors` **覆盖所有参数**（包括刚下载的 Qwen3.5 权重）。
+>
+> 也就是说，**最终使用的 VLM 权重是 InternVLA-A1.5 预训练后的版本**（已经过多阶段训练，与原始 Qwen3.5-2B 不同），不是原始 Qwen3.5-2B 的权重。Stage 1 下载的 HF 权重实际上是冗余的，被 Stage 2 完全覆盖。这只是因为 `__init__` 没有区分"首次从零预训练"和"加载已有 checkpoint"两种场景。
+>
+> 从正确性角度，这个冗余不影响结果（InternVLA-A1.5 checkpoint 包含完整的 VLM + action_expert 参数）。从效率角度，HuggingFace 的本地缓存机制使得重复下载的代价很小（首次约 4GB 下载，之后从 `~/.cache/huggingface/` 直接加载）。
 
 ### 5.2 从动作专家复制的理论依据
 
