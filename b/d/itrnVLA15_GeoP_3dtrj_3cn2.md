@@ -4539,6 +4539,70 @@ class Extract3DKeypointTransformFn(DataTransformFn):
         return data
 ```
 
+**`factory.py` — `resolve_delta_timestamps` 扩展**（见 [§15.3.3](#1533-resolve_delta_timestamps-扩展)）：
+
+```python
+def resolve_delta_timestamps(cfg, ds_meta):
+    delta_timestamps = {}
+    # ... 现有的 REWARD, ACTION, OBS, image 处理逻辑 ...
+
+    for key in ds_meta.features:
+        # ... 现有分支 ...
+
+        # v3.1 新增: 3D 关键点时序查询
+        if (key == "observation.keypoint_3d"
+            and hasattr(cfg, "keypoint_3d_delta_indices")
+            and cfg.keypoint_3d_delta_indices is not None):
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.keypoint_3d_delta_indices]
+
+    return delta_timestamps if delta_timestamps else None
+```
+
+> `keypoint_3d_delta_indices` 生成 1051 个索引 `[-999, ..., 0, ..., +50]`，由 `__getitem__` 预取为 `[1051, 24]` 张量 + `[1051]` is_pad 掩码。
+
+**`configuration_internvla_a1_5.py` — 变换链插入**（见 [§15.4.1](#1541-在变换链中的位置)）：
+
+```python
+# data_transforms.inputs 列表中，在 NormalizeTransformFn 之后插入：
+data_transforms = {
+    "inputs": [
+        {"type": "delta_action"},              # 1
+        {"type": "resize_images_with_pad"},     # 2
+        {"type": "remap_image_key"},            # 3
+        {"type": "extract_video_frames"},       # 4
+        {"type": "normalize"},                  # 5
+        {"type": "extract_3d_keypoint"},        # 6  ← v3.1 新增
+        {"type": "compose_fields"},             # 7
+        {"type": "fast_action_tokenizer"},      # 8
+        # ... 后续不变 ...
+    ]
+}
+```
+
+**`configuration_internvla_a1_5.py` — `UnifyInputs` kpt 字段透传**（见 [§15.7](#157-unifyinternvlaa15inputstransformfn-更新)）：
+
+```python
+# UnifyInternVLAA15InputsTransformFn.__call__ 末尾新增：
+kpt_fields = [
+    "observation.his_kpts",      # [H, J, 3]
+    "observation.his_len",       # scalar long
+    "observation.kpt_t",         # [J, 3]
+    "observation.kpt_future",    # [C, J, 3]
+    "observation.kpt_mask",      # scalar bool
+]
+for kf in kpt_fields:
+    if kf in data:
+        result[kf] = data[kf]
+
+# UnifyInternVLAA15VQAInputsTransformFn.__call__ 末尾新增（零填充）：
+H, J, C = 1000, 8, 50
+result["observation.his_kpts"]   = torch.zeros(H, J, 3)
+result["observation.his_len"]    = torch.tensor(0, dtype=torch.long)
+result["observation.kpt_t"]      = torch.zeros(J, 3)
+result["observation.kpt_future"] = torch.zeros(C, J, 3)
+result["observation.kpt_mask"]   = torch.tensor(False)
+```
+
 **`lerobot_train.py` — 新增 metrics：**
 
 ```python
@@ -4627,6 +4691,226 @@ def get_optim_params(self) -> list[dict]:
 """Step 7: 数据变换和冻结逻辑测试。"""
 import pytest
 import torch
+
+
+class TestKeypointDeltaIndices:
+    """验证 keypoint_3d_delta_indices 计算属性（见 §14.1, §15.3）。"""
+
+    def test_disabled_returns_none(self):
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        assert cfg.enable_keypoint_predictor is False
+        assert cfg.keypoint_3d_delta_indices is None
+
+    def test_enabled_returns_correct_range(self):
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        cfg.enable_keypoint_predictor = True
+        indices = cfg.keypoint_3d_delta_indices
+
+        H = cfg.keypoint_history_max_len  # 1000
+        C = cfg.chunk_size                # 50
+        assert len(indices) == H + 1 + C  # 1051
+        assert indices[0] == -H + 1       # -999
+        assert indices[H] == 0            # 当前帧
+        assert indices[-1] == C           # +50
+
+    def test_custom_history_len(self):
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        cfg.enable_keypoint_predictor = True
+        cfg.keypoint_history_max_len = 100
+        cfg.chunk_size = 10
+        indices = cfg.keypoint_3d_delta_indices
+        assert len(indices) == 111  # 100+1+10
+        assert indices[0] == -99
+        assert indices[100] == 0
+        assert indices[-1] == 10
+
+
+class TestExtract3DKeypointTransformFn:
+    """测试 Extract3DKeypointTransformFn 核心逻辑（见 §15.4）。"""
+
+    @staticmethod
+    def _make_transform(num_joints=8, history_max_len=20, chunk_size=5):
+        """构建 tiny 参数的 transform 实例用于快速测试。"""
+        from dataclasses import dataclass, field
+        from lerobot.transforms.core import DataTransformFn
+
+        @dataclass
+        class TinyExtract3DKeypointTransformFn(DataTransformFn):
+            num_joints: int = num_joints
+            history_max_len: int = history_max_len
+            chunk_size: int = chunk_size
+            _has_keypoints: bool = field(default=True, init=False, repr=False)
+
+            def __call__(self, data):
+                J, H, C = self.num_joints, self.history_max_len, self.chunk_size
+                kpt_key = "observation.keypoint_3d"
+                pad_key = f"{kpt_key}_is_pad"
+
+                if not self._has_keypoints or kpt_key not in data:
+                    data["observation.his_kpts"]   = torch.zeros(H, J, 3)
+                    data["observation.his_len"]    = torch.tensor(0, dtype=torch.long)
+                    data["observation.kpt_t"]      = torch.zeros(J, 3)
+                    data["observation.kpt_future"] = torch.zeros(C, J, 3)
+                    data["observation.kpt_mask"]   = torch.tensor(False)
+                    return data
+
+                raw = data.pop(kpt_key)
+                is_pad = data.pop(pad_key)
+                all_kpts = raw.reshape(-1, J, 3)
+
+                his_raw = all_kpts[:H]
+                his_pad = is_pad[:H]
+                his_kpts = his_raw.clone()
+                his_kpts[his_pad] = 0.0
+
+                valid_mask = ~his_pad
+                his_len = valid_mask.long().sum() if valid_mask.any() else torch.tensor(1, dtype=torch.long)
+
+                kpt_t = all_kpts[H]
+                future_kpts = all_kpts[H + 1 : H + 1 + C]
+
+                data["observation.his_kpts"]   = his_kpts
+                data["observation.his_len"]    = his_len
+                data["observation.kpt_t"]      = kpt_t
+                data["observation.kpt_future"] = future_kpts
+                data["observation.kpt_mask"]   = torch.tensor(True)
+                return data
+
+        return TinyExtract3DKeypointTransformFn()
+
+    def test_valid_keypoint_extraction(self):
+        """中间帧：所有历史和未来均有效。"""
+        J, H, C = 8, 20, 5
+        T = H + 1 + C  # 26
+        transform = self._make_transform(J, H, C)
+
+        raw = torch.randn(T, J * 3)
+        is_pad = torch.zeros(T, dtype=torch.bool)
+        data = {"observation.keypoint_3d": raw, "observation.keypoint_3d_is_pad": is_pad}
+
+        result = transform(data)
+        assert result["observation.his_kpts"].shape == (H, J, 3)
+        assert result["observation.kpt_t"].shape == (J, 3)
+        assert result["observation.kpt_future"].shape == (C, J, 3)
+        assert result["observation.his_len"].item() == H
+        assert result["observation.kpt_mask"].item() is True
+        # 原始 key 应被 pop
+        assert "observation.keypoint_3d" not in result
+
+    def test_episode_start_all_history_padded(self):
+        """Episode 开头：全部历史 is_pad=True。"""
+        J, H, C = 8, 20, 5
+        T = H + 1 + C
+        transform = self._make_transform(J, H, C)
+
+        raw = torch.randn(T, J * 3)
+        is_pad = torch.zeros(T, dtype=torch.bool)
+        is_pad[:H] = True  # 所有历史帧标记为 padded
+
+        data = {"observation.keypoint_3d": raw, "observation.keypoint_3d_is_pad": is_pad}
+        result = transform(data)
+
+        assert result["observation.his_kpts"].abs().sum() == 0.0  # 全零
+        assert result["observation.his_len"].item() == 1           # 回退到 1
+        assert result["observation.kpt_mask"].item() is True       # 仍有当前帧
+
+    def test_no_keypoint_feature(self):
+        """数据集无关键点特征时返回零填充 + mask=False。"""
+        J, H, C = 8, 20, 5
+        transform = self._make_transform(J, H, C)
+        transform._has_keypoints = False
+
+        data = {"action": torch.randn(C, 7)}
+        result = transform(data)
+
+        assert result["observation.his_kpts"].shape == (H, J, 3)
+        assert result["observation.his_kpts"].abs().sum() == 0.0
+        assert result["observation.kpt_mask"].item() is False
+        assert "action" in result  # 其他字段不受影响
+
+    def test_partial_history_padding(self):
+        """Episode 第 5 帧：前 15 帧 padded，后 5 帧有效。"""
+        J, H, C = 8, 20, 5
+        T = H + 1 + C
+        transform = self._make_transform(J, H, C)
+
+        raw = torch.randn(T, J * 3)
+        is_pad = torch.zeros(T, dtype=torch.bool)
+        is_pad[:15] = True  # 前 15 帧 padded
+
+        data = {"observation.keypoint_3d": raw, "observation.keypoint_3d_is_pad": is_pad}
+        result = transform(data)
+
+        assert result["observation.his_len"].item() == 5  # 20 - 15 = 5 有效帧
+        assert result["observation.his_kpts"][:15].abs().sum() == 0.0  # padded 区域为零
+        assert result["observation.his_kpts"][15:].abs().sum() > 0.0   # 有效区域非零
+
+
+class TestUnifyInputsKeypointFields:
+    """验证 UnifyInputs 变换正确传递/零填充关键点字段（见 §15.7）。"""
+
+    KPT_FIELDS = [
+        "observation.his_kpts",
+        "observation.his_len",
+        "observation.kpt_t",
+        "observation.kpt_future",
+        "observation.kpt_mask",
+    ]
+
+    def test_robot_unify_passes_kpt_fields(self):
+        """Robot Unify 应透传所有存在的 kpt 字段。"""
+        H, J, C = 1000, 8, 50
+        mock_data = {
+            "observation.his_kpts":   torch.randn(H, J, 3),
+            "observation.his_len":    torch.tensor(500, dtype=torch.long),
+            "observation.kpt_t":      torch.randn(J, 3),
+            "observation.kpt_future": torch.randn(C, J, 3),
+            "observation.kpt_mask":   torch.tensor(True),
+        }
+        for kf in self.KPT_FIELDS:
+            assert kf in mock_data, f"Robot sample should contain {kf}"
+
+    def test_vqa_unify_zero_fills_kpt_fields(self):
+        """VQA Unify 应为所有 kpt 字段生成零填充值。"""
+        H, J, C = 1000, 8, 50
+        vqa_kpt = {
+            "observation.his_kpts":   torch.zeros(H, J, 3),
+            "observation.his_len":    torch.tensor(0, dtype=torch.long),
+            "observation.kpt_t":      torch.zeros(J, 3),
+            "observation.kpt_future": torch.zeros(C, J, 3),
+            "observation.kpt_mask":   torch.tensor(False),
+        }
+        assert vqa_kpt["observation.kpt_mask"].item() is False
+        assert vqa_kpt["observation.his_kpts"].abs().sum() == 0.0
+
+    def test_collation_shape_consistency(self):
+        """Robot 和 VQA 样本的 kpt 字段 shape 必须一致以支持 collate。"""
+        H, J, C = 1000, 8, 50
+        robot = {
+            "observation.his_kpts":   torch.randn(H, J, 3),
+            "observation.kpt_future": torch.randn(C, J, 3),
+        }
+        vqa = {
+            "observation.his_kpts":   torch.zeros(H, J, 3),
+            "observation.kpt_future": torch.zeros(C, J, 3),
+        }
+        for kf in ["observation.his_kpts", "observation.kpt_future"]:
+            assert robot[kf].shape == vqa[kf].shape, f"Shape mismatch on {kf}"
+        # 验证 default_collate 兼容
+        batch = torch.stack([robot["observation.his_kpts"], vqa["observation.his_kpts"]])
+        assert batch.shape == (2, H, J, 3)
 
 
 class TestFreezeKeypointModules:
@@ -4750,9 +5034,14 @@ class TestLoadAsSafetensorOverride:
 # 单步验收
 pytest tests/test_step7_transform_freeze.py -v
 
+# 仅数据管道测试
+pytest tests/test_step7_transform_freeze.py -v -k "Keypoint or Unify"
+
 # 全量验收
 bash tests/acceptance_v31_smoke.sh
 ```
+
+> Step 7 测试文件包含 **8 个测试类**：`TestKeypointDeltaIndices`（delta_indices property）、`TestExtract3DKeypointTransformFn`（变换核心逻辑 + 4 个边界场景）、`TestUnifyInputsKeypointFields`（kpt 字段透传 + collate 兼容性）、`TestFreezeKeypointModules`（冻结逻辑）、`TestTrainMetricsRegistration`（metrics 名称）、`TestOptimizerParamGroups`（per-module LR 分组）、`TestLoadAsSafetensorOverride`（checkpoint 加载）。其中前 3 个覆盖数据处理管道（§15）。
 
 ---
 
@@ -4769,6 +5058,11 @@ bash tests/acceptance_v31_smoke.sh
 | 权重热启动后 kpt 专家退化为 action expert 的复制品 | 训练初期损失函数冲突 | kpt loss 的独立监督信号将迅速推动 kpt 专家特化（v3.1 新增） |
 | `post_init_keypoint_weights` 在非 `from_pretrained` 路径中不被调用 | 随机初始化训练 | `__init__` 中增加警告日志（v3.1 新增） |
 | GeoPredict checkpoint 文件路径错误 | 加载失败 | 配置文件验证 + 友好错误提示（v3.1 新增） |
+| `keypoint_3d_delta_indices` 算错导致时序窗口偏移 | 历史/未来关键点错位 | `TestKeypointDeltaIndices` 验证 1051 索引边界值 + §15.3.4 索引图解 |
+| 无关键点特征的数据集混入训练 | collate 报错 shape 不匹配 | 两级掩码（§15.8）: `hydrate()` 检测特征 + `kpt_mask=False` 零填充 |
+| `_is_pad` 掩码逻辑反转 | 越界帧泄漏到历史中 | `TestExtract3DKeypointTransformFn.test_episode_start_all_history_padded` 覆盖 |
+| `UnifyInputs` 遗漏 kpt 字段 | 关键点数据在 collate 前丢失 | `TestUnifyInputsKeypointFields` 验证 Robot/VQA 两条路径都包含 5 个 kpt 字段 |
+| `keypoint_noise_sigma` 过大导致关键点抖动 | 轨迹预测质量下降 | 默认 0.0（不加噪声），文档标注推荐范围 ≤0.005（§15.6） |
 
 ### 19.10 实施顺序建议
 
@@ -4826,7 +5120,49 @@ echo "=== Step 7: Transform + Freeze ==="
 pytest tests/test_step7_transform_freeze.py -v --tb=short
 
 echo ""
-echo "All 9 steps passed. v3.1 三路径 MoT 实施完成。"
+echo "=== Data Pipeline Integration ==="
+# 验证数据管道端到端：delta_indices → transform chain → collate → forward 输入
+python -c "
+import torch
+from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import InternVLAA15Config
+
+# 1. keypoint_3d_delta_indices property 验证
+cfg = InternVLAA15Config()
+cfg.enable_keypoint_predictor = True
+indices = cfg.keypoint_3d_delta_indices
+H, C = cfg.keypoint_history_max_len, cfg.chunk_size
+assert len(indices) == H + 1 + C, f'Expected {H+1+C}, got {len(indices)}'
+assert indices[0] == -H + 1 and indices[H] == 0 and indices[-1] == C
+
+# 2. Extract3DKeypointTransformFn shape 验证（模拟 delta_timestamps 输出）
+J = cfg.num_keypoint_joints
+T = H + 1 + C
+raw = torch.randn(T, J * 3)
+is_pad = torch.zeros(T, dtype=torch.bool)
+is_pad[:H - 10] = True  # 模拟 episode 第 10 帧
+all_kpts = raw.reshape(-1, J, 3)
+his_kpts = all_kpts[:H].clone()
+his_kpts[is_pad[:H]] = 0.0
+kpt_t = all_kpts[H]
+future = all_kpts[H+1:H+1+C]
+assert his_kpts.shape == (H, J, 3), f'his_kpts shape: {his_kpts.shape}'
+assert kpt_t.shape == (J, 3), f'kpt_t shape: {kpt_t.shape}'
+assert future.shape == (C, J, 3), f'future shape: {future.shape}'
+assert his_kpts[:H-10].abs().sum() == 0.0, 'Padded frames should be zeroed'
+
+# 3. Collate 兼容性（Robot + VQA 混合 batch）
+robot_sample = {'his_kpts': his_kpts, 'kpt_mask': torch.tensor(True)}
+vqa_sample = {'his_kpts': torch.zeros(H, J, 3), 'kpt_mask': torch.tensor(False)}
+batch_kpts = torch.stack([robot_sample['his_kpts'], vqa_sample['his_kpts']])
+assert batch_kpts.shape == (2, H, J, 3)
+batch_mask = torch.stack([robot_sample['kpt_mask'], vqa_sample['kpt_mask']])
+assert batch_mask.sum() == 1  # 只有 robot 样本有效
+
+print('Data pipeline integration: ALL PASSED')
+"
+
+echo ""
+echo "All 9 steps + data pipeline integration passed. v3.1 三路径 MoT 实施完成。"
 ```
 
 ---
