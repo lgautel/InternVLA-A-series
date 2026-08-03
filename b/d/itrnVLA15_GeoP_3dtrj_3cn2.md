@@ -1156,6 +1156,65 @@ graph TB
 
 当 kpt K/V 不 detach 时，action loss 的梯度可以通过交叉注意力回传到关键点专家。这意味着关键点专家的表征不仅为 3D 预测优化（kpt loss），还**额外**为动作质量优化（action loss）。关键点专家学习生成对动作预测最有用的运动学表征，而不仅仅是最准确的 3D 位置预测。
 
+### 9.4 Soft Knowledge Insulation（连续梯度缩放）
+
+标准 KI 开关是**二值的**——`.detach()` 完全阻断梯度（scale=0）或完全放行（scale=1）。微调时常见的需求是"VLM 只允许轻微更新"，这需要 0 和 1 之间的中间选项。
+
+**Soft KI 机制**：通过 `ki_gradient_scale` 超参将二值 detach 替换为连续的梯度缩放：
+
+```python
+# 原始 KI（二值）
+if knowledge_insulation:
+    pfx_key_for_act = prefix_key.detach()         # scale = 0
+else:
+    pfx_key_for_act = prefix_key                   # scale = 1
+
+# Soft KI（连续）
+if knowledge_insulation:
+    scale = self.config.ki_gradient_scale           # 0.0 ~ 1.0
+    if scale == 0.0:
+        pfx_key_for_act = prefix_key.detach()
+    else:
+        # stop-gradient 技巧: 前向值不变, 反向梯度乘以 scale
+        pfx_key_for_act = prefix_key * scale + prefix_key.detach() * (1 - scale)
+else:
+    pfx_key_for_act = prefix_key
+```
+
+**原理**：`x * scale + x.detach() * (1 - scale)` 的前向值恒等于 `x`（因为 `x.detach()` 的值就是 `x`），但反向传播时 `.detach()` 部分不贡献梯度，因此 $\frac{\partial}{\partial x} = \text{scale}$。这等效于将通过该路径的梯度乘以 `scale`。
+
+**配置字段**：
+
+| 字段 | 默认值 | 作用 |
+|---|---|---|
+| `ki_gradient_scale` | 0.0 | `knowledge_insulation=True` 时，action loss → VLM 的梯度缩放因子 |
+| `ki_kpt_gradient_scale` | 0.0 | `knowledge_insulation_kpt=True` 时，kpt loss → VLM 的梯度缩放因子 |
+
+> **与 per-module LR 的区别**：Soft KI 控制的是**特定 loss 通过特定交叉注意力路径**对 VLM 的梯度。per-module LR 控制的是 VLM **整体的参数更新步长**。两者正交，可以组合使用：
+> - `vlm_lr_scale=0.05` + `ki_gradient_scale=0.0`：VLM 只被 $\mathcal{L}_{vqa}$ 轻微更新，不受 action/kpt loss 影响
+> - `vlm_lr_scale=0.1` + `ki_gradient_scale=0.1`：VLM 被所有 loss 轻微更新，但 action/kpt loss 的贡献只有 $\mathcal{L}_{vqa}$ 的 10%
+
+**在 `compute_layer_complete` 中的实现位置**：
+
+Phase 4（关键点专家注意力）中的 VLM K/V 处理：
+
+```python
+# Phase 4: 关键点专家交叉注意力
+if knowledge_insulation_kpt:
+    scale = getattr(config, "ki_kpt_gradient_scale", 0.0)
+    if scale == 0.0:
+        pfx_key_for_kpt   = prefix_key.detach()
+        pfx_value_for_kpt = prefix_value.detach()
+    else:
+        pfx_key_for_kpt   = prefix_key * scale + prefix_key.detach() * (1 - scale)
+        pfx_value_for_kpt = prefix_value * scale + prefix_value.detach() * (1 - scale)
+else:
+    pfx_key_for_kpt   = prefix_key
+    pfx_value_for_kpt = prefix_value
+```
+
+Phase 5（动作专家注意力）中同理，使用 `ki_gradient_scale`。
+
 ---
 
 ## 10. 训练前向传播
@@ -1398,6 +1457,117 @@ $$\mathcal{L}_{total} = \underbrace{10 \cdot \mathcal{L}_{action}}_{\text{流匹
 | $\mathcal{L}_{kpt}^{fut}$ | **`kpt_out`** | `kpt_out[:, -J:]` + sinusoidal PE → `keypoint_out_proj` | 新增 |
 
 > **与 v2 的关键差异**：v2 从 `suffix_out[:, -(C+J):-C]` 提取 query_kpt（与 action 共享同一 suffix_out）；v3.1 从独立的 `kpt_out[:, -J:]` 提取（完全独立的路径输出）。
+
+### 11.3 Loss 合成代码与超参控制
+
+Inner forward（§10.4）返回 5 个原始 loss 张量。Policy wrapper 的 `forward` 方法将它们合成为最终标量损失。
+
+**问题与修复**：原始 InternVLA-A1.5 代码中 action loss 的权重 `10` 是硬编码的（[`modeling_internvla_a1_5.py:1650`](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L1650)），且无 `kpt_loss_weight` 的接入代码。v3.1 需要修复这两点。
+
+**改进后的 loss 合成代码**（在 `InternVLAA15Policy.forward` 中）：
+
+```python
+# ---- Loss 合成（v3.1 改进）----
+if self.config.enable_vqa_loss:
+    # 原始代码: 10 * loss_fm_action (硬编码 10×)
+    # v3.1: 改为可配置的 action_loss_weight
+    loss = (
+        self.config.action_loss_weight * loss_fm_action
+        + self.config.lambda_vqa * loss_vlm
+        + self.config.video_loss_weight * video_loss
+    )
+else:
+    loss = (
+        self.config.action_loss_weight * loss_fm_action
+        + self.config.video_loss_weight * video_loss
+    )
+
+# v3.1 新增: 关键点损失接入
+if self.config.enable_keypoint_predictor:
+    loss = loss + self.config.kpt_loss_weight * (loss_kpt_current + loss_kpt_future)
+```
+
+> **`kpt_loss_weight` 与 `action_loss_weight` 的相对比例**：action_loss 的默认权重是 10.0（继承原始设计），而 kpt_loss_weight 默认为 1.0。两个 MSE loss 的数值范围可能不同——action loss 基于流匹配（$u_t = \text{noise} - \text{actions}$），kpt loss 基于 3D 坐标差。实际微调时应观察 loss 数值并据此调整 `kpt_loss_weight`。
+
+**完整超参列表**：
+
+| 超参 | 配置字段 | 默认值 | 原始代码状态 | v3.1 改动 |
+|---|---|---|---|---|
+| action 权重 | `action_loss_weight` | **10.0** | 硬编码 `10 *`，无配置字段 | **新增配置字段**，替代硬编码 |
+| VQA 权重 | `lambda_vqa` | 1.0 | ✓ 已有 | 不变 |
+| video 权重 | `video_loss_weight` | 1.0 | ✓ 已有 | 不变 |
+| kpt 权重 | `kpt_loss_weight` | 1.0 | 配置字段已定义但**未接入** | **接入 loss 合成代码** |
+| kpt_cur/fut 分别控制 | `kpt_future_loss_weight` | 1.0 | 不存在 | **新增**（可选，默认 cur 和 fut 等权） |
+
+> **`kpt_future_loss_weight` 的用途**：在某些场景下，未来轨迹预测的误差可能远大于当前帧（因为误差随时间步累积），导致 $\mathcal{L}_{kpt}^{fut}$ 主导训练方向。此时可以降低 `kpt_future_loss_weight`（如 0.5）来平衡 cur 和 fut。完整公式变为：
+>
+> $$\mathcal{L}_{kpt} = \beta \cdot (\mathcal{L}_{kpt}^{cur} + \gamma \cdot \mathcal{L}_{kpt}^{fut})$$
+>
+> 其中 $\beta$ = `kpt_loss_weight`，$\gamma$ = `kpt_future_loss_weight`。
+
+**其他 loss 控制开关**（已有，不变）：
+
+| 开关 | 效果 |
+|---|---|
+| `action_loss_only=True` | 跳过 video loss（也跳过 WAN 加载）|
+| `video_loss_only=True` | 跳过 action loss |
+| `enable_vqa_loss=False` | 跳过 VQA 交叉熵 |
+
+### 11.4 微调推荐配置矩阵
+
+不同微调场景下的 loss 权重和梯度控制推荐配置：
+
+```mermaid
+graph TB
+    subgraph LOSSES["5 个 Loss 及其权重"]
+        L_ACT["L_action<br/>weight = action_loss_weight"]
+        L_VQA["L_vqa<br/>weight = lambda_vqa"]
+        L_VID["L_video<br/>weight = video_loss_weight"]
+        L_KPT_C["L_kpt_cur<br/>weight = kpt_loss_weight"]
+        L_KPT_F["L_kpt_fut<br/>weight = kpt_loss_weight × kpt_future_loss_weight"]
+    end
+
+    subgraph MODULES["模块与 LR 策略"]
+        VLM["VLM 骨干<br/>vlm_lr_scale = 0.0~0.1"]
+        KPT["关键点专家<br/>kpt_expert_lr_scale = 1.0"]
+        ACT["动作专家<br/>action_expert_lr_scale = 1.0"]
+        TE["TrackEncoder<br/>track_encoder_lr_scale = 0.5~1.0"]
+        WAN["WAN DiT<br/>freeze_wan_dit = True"]
+    end
+
+    L_ACT -->|"直接 24 层"| ACT
+    L_ACT -.->|"KI: ki_gradient_scale"| VLM
+    L_ACT -.->|"k2a_detach"| KPT
+    L_VQA -->|"直接"| VLM
+    L_VID -->|"直接 24 层"| ACT
+    L_KPT_C -->|"直接 24 层"| KPT
+    L_KPT_C -->|"直接"| TE
+    L_KPT_C -.->|"KI_kpt: ki_kpt_gradient_scale"| VLM
+    L_KPT_F -->|"直接 24 层"| KPT
+
+    style VLM fill:#e8f5e9,stroke:#2e7d32
+    style WAN fill:#ffcdd2,stroke:#c62828
+    style MODULES fill:#f5f5f5,stroke:#9e9e9e
+```
+
+| 场景 | `action_loss_weight` | `kpt_loss_weight` | `vlm_lr_scale` | KI / KI_kpt | `ki_gradient_scale` | `freeze_learnable_tokens` | 适用条件 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
+| **保守微调** | 10.0 | 1.0 | **0.0** | True / True | 0.0 | True | 少数据 (≤1K episodes)，避免灾难性遗忘 |
+| **标准微调** | 10.0 | 1.0 | **0.05** | True / True | **0.0** | True | 中等数据 (1K-10K)，VLM 轻微更新仅来自 $\mathcal{L}_{vqa}$ |
+| **充分微调** | 10.0 | 1.0 | **0.1** | **False** / False | N/A | False | 大数据 (>10K)，允许端到端优化 |
+| **关键点专注** | 10.0 | **5.0** | 0.0 | True / **False** | 0.0 | True | 调试 kpt 预测质量，允许 $\mathcal{L}_{kpt}$ 更新 VLM |
+| **仅动作微调** | 10.0 | 0.0 | 0.0 | True / True | 0.0 | True | 关键点模块冻结，仅调动作 |
+
+**配置组合的核心原则**：
+
+1. **VLM 保护有三层递进机制**：
+   - **第一层（最粗）**：`train_expert_only=True` → VLM 完全冻结（0 梯度），最保守
+   - **第二层（中等）**：`vlm_lr_scale=0.05` → VLM 所有 loss 的梯度通过，但步长只有动作专家的 5%
+   - **第三层（最精细）**：`knowledge_insulation=True` + `ki_gradient_scale=0.1` → 只有 $\mathcal{L}_{vqa}$ 以全 LR 更新 VLM，action/kpt loss 的梯度衰减到 10%
+
+2. **关键点专家的双重监督**：当 `kpt_to_action_detach=False`（推荐）时，关键点专家同时被 $\mathcal{L}_{kpt}$（直接，24 层）和 $\mathcal{L}_{action}$（间接，6 层交叉注意力）更新。这确保关键点表征既准确又对动作预测有用。
+
+3. **WAN 始终冻结**（微调时 `freeze_wan_dit=True`）：WAN DiT 有 ~5B 参数，微调时不应更新。`action_loss_only=True` 可以完全跳过 WAN 加载（节省 ~10GB 显存）。
 
 ---
 
@@ -1698,14 +1868,30 @@ v3.1 相对于 v2 的推理开销几乎相同（仅多 240 token-layer 计算，
 # ---- 3D 关键点轨迹预测器（v3.1 三路径 MoT）----
 enable_keypoint_predictor: bool = False
 num_keypoint_joints: int = 8
-kpt_loss_weight: float = 1.0
 
+# Loss 权重（见 §11.3）
+action_loss_weight: float = 10.0              # 替代原始硬编码 10×
+kpt_loss_weight: float = 1.0                  # β: kpt 总体权重
+kpt_future_loss_weight: float = 1.0           # γ: kpt 未来轨迹相对当前帧的权重
+
+# 关键点专家维度
 kpt_expert_hidden_size: int = 1024
 kpt_expert_intermediate_size: int = 3072
 
+# 知识绝缘开关（见 §9.2-9.4）
 knowledge_insulation_kpt: bool = False
 kpt_to_action_detach: bool = False
+ki_gradient_scale: float = 0.0               # Soft KI: action loss → VLM 梯度缩放 (0~1)
+ki_kpt_gradient_scale: float = 0.0           # Soft KI: kpt loss → VLM 梯度缩放 (0~1)
+
+# 冻结开关
 freeze_keypoint_modules: bool = False
+
+# Per-module 学习率缩放（见 §14.3）
+vlm_lr_scale: float = 1.0                    # VLM backbone LR 倍率 (0.0=不更新)
+action_expert_lr_scale: float = 1.0           # 动作专家 LR 倍率
+kpt_expert_lr_scale: float = 1.0              # 关键点专家 LR 倍率
+track_encoder_lr_scale: float = 1.0           # TrackEncoder LR 倍率
 
 # 权重初始化（v3.1 新增）
 init_kpt_expert_from_action: bool = True          # Stage 3: 从 action_expert 热启动
@@ -1720,6 +1906,8 @@ keypoint_track_num_heads: int = 8
 keypoint_track_ff_dim: int = 1024
 keypoint_history_max_len: int = 1000
 ```
+
+> **新增字段总计 27 个**（原先 17 个 + 新增 10 个）。新增的 10 个字段：`action_loss_weight`, `kpt_future_loss_weight`, `ki_gradient_scale`, `ki_kpt_gradient_scale`, `vlm_lr_scale`, `action_expert_lr_scale`, `kpt_expert_lr_scale`, `track_encoder_lr_scale`（8 个全新）+ `action_loss_weight` 替代硬编码 + `kpt_future_loss_weight` 细粒度 kpt loss 控制。
 
 ### 14.2 KeypointExpertConfig 类
 
@@ -1752,6 +1940,145 @@ class KeypointExpertConfig:
 
 实例化过程与 ActionExpertConfig 完全一致：`head_dim` 从 VLM 回退，`num_attention_heads` 和 `num_key_value_heads` 从 VLM 无条件复制。仅 `hidden_size` 和 `intermediate_size` 来自 `InternVLAA15Config.kpt_expert_hidden_size` / `kpt_expert_intermediate_size`。
 
+### 14.3 优化器参数组设计（Per-module 学习率）
+
+微调时不同模块对学习率的敏感度差异很大：VLM 预训练权重需要极低 LR 避免灾难性遗忘，而新初始化的 TrackEncoder 需要较高 LR 快速收敛。原版 `get_optim_params` 返回 `self.parameters()`（所有参数共享同一 LR），无法实现此需求。
+
+#### 14.3.1 设计参考
+
+InternVLA-A 系列中 `XVLAAdamWConfig`（位于 `src/lerobot/optim/optimizers.py:107-205`）已实现类似的 per-module LR 分组：
+
+```python
+# XVLAAdamWConfig 的参数分组策略（参考实现）
+class XVLAAdamWConfig:
+    soft_prompt_lr_scale: float = 1.0  # 对 soft-prompt 的独立 LR 缩放
+    
+    def build(self, params_or_model, lr):
+        # VLM 主干: lr * 0.1, weight_decay * 0.1
+        # Soft-prompt: lr * soft_prompt_lr_scale
+        # Expert 模块: lr * 1.0 (默认)
+```
+
+#### 14.3.2 v3.1 的 `get_optim_params` 实现
+
+v3.1 在 `InternVLAA15Policy` 中重写 `get_optim_params`，按 4 个模块组返回参数：
+
+```python
+def get_optim_params(self) -> list[dict]:
+    """按模块分组返回参数，支持 per-module LR 缩放。
+    
+    配置项（§14.1）:
+      - vlm_lr_scale: VLM backbone 的 LR 倍率 (建议微调时设 0.01~0.1)
+      - action_expert_lr_scale: 动作专家 LR 倍率
+      - kpt_expert_lr_scale: 关键点专家 LR 倍率
+      - track_encoder_lr_scale: TrackEncoder LR 倍率 (新初始化时可设 2.0~5.0)
+    """
+    config = self.config
+    base_lr = config.optimizer_lr  # 基准 LR, e.g. 5e-5
+
+    # ---- 参数名 → 模块组映射 ----
+    kpt_expert_prefixes = ("model.kpt_expert_layers.",)
+    track_encoder_prefixes = ("model.track_encoder.",)
+    action_expert_prefixes = ("model.action_expert_layers.",)
+    # 其余参数归入 VLM 组（含 vision_encoder, embed_tokens, lm_head,
+    #   learnable_tokens, kpt_embed/project, Transformer layers 的 VLM 路径等）
+
+    vlm_params, action_params, kpt_params, track_params = [], [], [], []
+
+    for name, param in self.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(name.startswith(p) for p in track_encoder_prefixes):
+            track_params.append(param)
+        elif any(name.startswith(p) for p in kpt_expert_prefixes):
+            kpt_params.append(param)
+        elif any(name.startswith(p) for p in action_expert_prefixes):
+            action_params.append(param)
+        else:
+            vlm_params.append(param)
+
+    param_groups = []
+    if vlm_params:
+        param_groups.append({
+            "params": vlm_params,
+            "lr": base_lr * config.vlm_lr_scale,
+            "name": "vlm_backbone",
+        })
+    if action_params:
+        param_groups.append({
+            "params": action_params,
+            "lr": base_lr * config.action_expert_lr_scale,
+            "name": "action_expert",
+        })
+    if kpt_params:
+        param_groups.append({
+            "params": kpt_params,
+            "lr": base_lr * config.kpt_expert_lr_scale,
+            "name": "kpt_expert",
+        })
+    if track_params:
+        param_groups.append({
+            "params": track_params,
+            "lr": base_lr * config.track_encoder_lr_scale,
+            "name": "track_encoder",
+        })
+
+    return param_groups
+```
+
+#### 14.3.3 与训练循环的集成
+
+`src/lerobot/scripts/lerobot_train.py` 中 `make_optimizer_and_scheduler` 调用 `policy.get_optim_params()` 获取参数。当返回值为 `list[dict]` 而非 `list[Parameter]` 时，`AdamW` 自动启用分组 LR：
+
+```python
+# lerobot_train.py 中的调用路径（无需修改）
+optimizer = torch.optim.AdamW(
+    policy.get_optim_params(),   # list[dict] → 分组模式
+    lr=cfg.optimizer_lr,         # 作为未覆盖组的默认 LR
+    weight_decay=cfg.optimizer_weight_decay,
+)
+```
+
+> **注意**：分组中已显式设置 `lr`，因此 `AdamW` 构造函数的 `lr` 参数仅用作没有显式 `lr` 的参数组的默认值。v3.1 所有组都显式设置了 `lr`，因此全局 `lr` 实际不生效。
+
+#### 14.3.4 微调场景推荐配置
+
+| 场景 | `vlm_lr_scale` | `action_expert_lr_scale` | `kpt_expert_lr_scale` | `track_encoder_lr_scale` | 说明 |
+|:-----|:---:|:---:|:---:|:---:|:-----|
+| 保守微调 | 0.0 | 1.0 | 1.0 | 2.0 | VLM 完全冻结（等效 `train_expert_only`） |
+| 标准微调 | 0.05 | 1.0 | 1.0 | 2.0 | VLM 微量更新，专家正常训练 |
+| 充分微调 | 0.1 | 1.0 | 1.0 | 1.0 | 所有模块都更新，VLM 较低速率 |
+| 仅动作专家 | 0.0 | 1.0 | 0.0 | 0.0 | 单专家微调，最安全最快 |
+| Stage 4 初始化 | 0.0 | 0.0 | 1.0 | 5.0 | 仅训练关键点模块，TrackEncoder 高 LR 快速适应 |
+
+#### 14.3.5 与 Soft KI 和 Loss 权重的关系
+
+Per-module LR、Soft KI（§9.4）和 Loss 权重（§11.3）是三个**正交**的梯度控制机制，各自作用于不同层面：
+
+```
+Loss 权重 (§11.3)          → 控制每种 loss 对总梯度的相对贡献
+                              ↓
+Soft KI (§9.4)             → 在 Transformer 层内按路径选择性缩放梯度
+                              ↓
+Per-module LR (§14.3)      → 在优化器层面按模块缩放学习率（即步长）
+```
+
+三者可以组合使用。例如典型的保守微调配置：
+
+```yaml
+# Loss 权重：减小 kpt loss 避免拉偏 VLM
+action_loss_weight: 10.0
+kpt_loss_weight: 0.5
+
+# Soft KI：允许微量 action 梯度流入 VLM
+ki_gradient_scale: 0.05
+ki_kpt_gradient_scale: 0.0
+
+# Per-module LR：VLM 极低速率更新
+vlm_lr_scale: 0.05
+track_encoder_lr_scale: 2.0
+```
+
 ---
 
 ## 15. 代码修改指南
@@ -1766,9 +2093,9 @@ class KeypointExpertConfig:
 
 | 文件 | 修改内容 |
 |---|---|
-| [`modeling_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) | **(1)** `compute_layer_complete`（L119-335）：2 → 3 路径。**(2)** 新增 `compute_layer_suffix_only`。**(3)** `InternVLAA15WithExpertModel.__init__`（L360-412）：新增 `self.keypoint_expert`。**(4)** `InternVLAA15WithExpertModel.forward`（L435-536）：4 种 dispatch。**(5)** `InternVLAA15.__init__`（L539-638）：新增 TrackEncoder 等模块。**(6)** 新增 `embed_kpt_suffix`, `post_init_keypoint_weights` 方法。**(7)** `forward`（L1099-1246）：新增 kpt 参数和损失。**(8)** `denoise_step`：三路径掩码。**(9)** `sample_actions`：传入 kpt 参数。**(10)** `set_requires_grad`：kpt 冻结逻辑。 |
+| [`modeling_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) | **(1)** `compute_layer_complete`（L119-335）：2 → 3 路径。**(2)** 新增 `compute_layer_suffix_only`。**(3)** `InternVLAA15WithExpertModel.__init__`（L360-412）：新增 `self.keypoint_expert`。**(4)** `InternVLAA15WithExpertModel.forward`（L435-536）：4 种 dispatch。**(5)** `InternVLAA15.__init__`（L539-638）：新增 TrackEncoder 等模块。**(6)** 新增 `embed_kpt_suffix`, `post_init_keypoint_weights` 方法。**(7)** `forward`（L1099-1246）：新增 kpt 参数和损失；loss 合成使用 `action_loss_weight` / `kpt_future_loss_weight` 替代硬编码。**(8)** `denoise_step`：三路径掩码。**(9)** `sample_actions`：传入 kpt 参数。**(10)** `set_requires_grad`：kpt 冻结逻辑。**(11)** `InternVLAA15Policy.get_optim_params`：重写为 per-module LR 分组（见 §14.3）。 |
 | [`pretrained.py`](src/lerobot/policies/pretrained.py) | `InternVLAA15Policy` override `_load_as_safetensor`：加载后调用 `post_init_keypoint_weights` 和可选的 GeoPredict 权重加载。 |
-| [`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | 添加 17 个新配置字段（含 2 个 v3.1 新增的初始化控制字段）。 |
+| [`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | 添加 27 个新配置字段（含 2 个 v3.1 新增的初始化控制字段）。 |
 | [`transform_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) | 新增 `Extract3DKeypointTransformFn`。 |
 | [`lerobot_train.py`](src/lerobot/scripts/lerobot_train.py) | 新增 `loss_kpt_current`, `loss_kpt_future` 指标。 |
 
@@ -1961,7 +2288,7 @@ graph LR
 |---|---|---|
 | **新建** | `tests/conftest.py` | 共享 fixture: tiny Qwen3.5 配置、tiny expert 工厂 |
 | **修改** | `pyproject.toml` | 添加 `[tool.pytest.ini_options]` |
-| **修改** | `src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py` | 添加 17 个新配置字段（含 v3.1 新增的 `init_kpt_expert_from_action`, `geopredict_checkpoint_path`） |
+| **修改** | `src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py` | 添加 27 个新配置字段（含 v3.1 新增的 `init_kpt_expert_from_action`, `geopredict_checkpoint_path`） |
 | **新建** | `tests/test_step0_config.py` | 配置字段单元测试 |
 
 #### 核心代码变更
@@ -1983,19 +2310,36 @@ addopts = "-v --tb=short"
 # ---- 3D 关键点轨迹预测器（v3.1 三路径 MoT）----
 enable_keypoint_predictor: bool = False
 num_keypoint_joints: int = 8
-kpt_loss_weight: float = 1.0
 
+# Loss 权重（见 §11.3）
+action_loss_weight: float = 10.0              # 替代原始硬编码 10×
+kpt_loss_weight: float = 1.0                  # β: kpt 总体权重
+kpt_future_loss_weight: float = 1.0           # γ: kpt 未来轨迹相对当前帧的权重
+
+# 关键点专家维度
 kpt_expert_hidden_size: int = 1024
 kpt_expert_intermediate_size: int = 3072
 
+# 知识绝缘开关（见 §9.2-9.4）
 knowledge_insulation_kpt: bool = False
 kpt_to_action_detach: bool = False
+ki_gradient_scale: float = 0.0               # Soft KI: action loss → VLM 梯度缩放
+ki_kpt_gradient_scale: float = 0.0           # Soft KI: kpt loss → VLM 梯度缩放
+
+# 冻结开关
 freeze_keypoint_modules: bool = False
+
+# Per-module 学习率缩放（见 §14.3）
+vlm_lr_scale: float = 1.0
+action_expert_lr_scale: float = 1.0
+kpt_expert_lr_scale: float = 1.0
+track_encoder_lr_scale: float = 1.0
 
 # 权重初始化（v3.1 新增）
 init_kpt_expert_from_action: bool = True
 geopredict_checkpoint_path: str | None = None
 
+# TrackEncoder 超参数
 keypoint_track_input_dim: int = 3
 keypoint_track_patch_size: int = 4
 keypoint_track_embed_dim: int = 256
@@ -2004,6 +2348,8 @@ keypoint_track_num_heads: int = 8
 keypoint_track_ff_dim: int = 1024
 keypoint_history_max_len: int = 1000
 ```
+
+> **配置字段总计 27 个**（原先 17 个 + 新增 10 个）。新增字段详见 §14.1 说明。
 
 **`tests/conftest.py` — 共享 fixture：**
 
@@ -2106,6 +2452,17 @@ class TestKeypointConfigFields:
         assert cfg.kpt_expert_hidden_size == 1024
         assert cfg.kpt_expert_intermediate_size == 3072
 
+    def test_default_loss_weight_fields(self):
+        """新增的 loss 权重配置字段（见 §11.3）。"""
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        assert cfg.action_loss_weight == 10.0
+        assert cfg.kpt_loss_weight == 1.0
+        assert cfg.kpt_future_loss_weight == 1.0
+
     def test_default_knowledge_insulation_switches(self):
         from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
             InternVLAA15Config,
@@ -2115,6 +2472,28 @@ class TestKeypointConfigFields:
         assert cfg.knowledge_insulation_kpt is False
         assert cfg.kpt_to_action_detach is False
         assert cfg.freeze_keypoint_modules is False
+
+    def test_default_soft_ki_fields(self):
+        """Soft Knowledge Insulation 梯度缩放字段（见 §9.4）。"""
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        assert cfg.ki_gradient_scale == 0.0
+        assert cfg.ki_kpt_gradient_scale == 0.0
+
+    def test_default_per_module_lr_scales(self):
+        """Per-module 学习率缩放字段（见 §14.3）。"""
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        assert cfg.vlm_lr_scale == 1.0
+        assert cfg.action_expert_lr_scale == 1.0
+        assert cfg.kpt_expert_lr_scale == 1.0
+        assert cfg.track_encoder_lr_scale == 1.0
 
     def test_default_weight_init_fields(self):
         """v3.1 新增的权重初始化配置字段。"""
@@ -3338,7 +3717,8 @@ v3.1 额外增加了 `_load_as_safetensor` override 集成。
 | **修改** | `lerobot_train.py` | `train_metrics` 新增 `loss_kpt_current`, `loss_kpt_future` |
 | **修改** | `modeling_internvla_a1_5.py` | `set_requires_grad` 新增 `freeze_keypoint_modules` 逻辑 |
 | **修改** | `pretrained.py` | `InternVLAA15Policy` override `_load_as_safetensor`（见[第 5.4 节](#54-调用时机override-_load_as_safetensor)） |
-| **新建** | `tests/test_step7_transform_freeze.py` | 变换和冻结测试 |
+| **修改** | `modeling_internvla_a1_5.py` | `InternVLAA15Policy.get_optim_params` 重写为 per-module LR 分组（见 §14.3） |
+| **新建** | `tests/test_step7_transform_freeze.py` | 变换、冻结、优化器分组测试 |
 
 #### 核心代码变更
 
@@ -3384,6 +3764,61 @@ def set_requires_grad(self):
 ```
 
 **`pretrained.py` — `_load_as_safetensor` override**（见[第 5.4 节](#54-调用时机override-_load_as_safetensor)）：加载后调用 `post_init_keypoint_weights()` 和可选的 `load_geopredict_track_encoder_weights()`。
+
+**`modeling_internvla_a1_5.py` — `get_optim_params` 重写**（见 §14.3.2 完整代码）：
+
+```python
+# InternVLAA15Policy 中替换原有 get_optim_params
+def get_optim_params(self) -> list[dict]:
+    config = self.config
+    base_lr = config.optimizer_lr
+
+    kpt_expert_prefixes = ("model.kpt_expert_layers.",)
+    track_encoder_prefixes = ("model.track_encoder.",)
+    action_expert_prefixes = ("model.action_expert_layers.",)
+
+    vlm_params, action_params, kpt_params, track_params = [], [], [], []
+
+    for name, param in self.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(name.startswith(p) for p in track_encoder_prefixes):
+            track_params.append(param)
+        elif any(name.startswith(p) for p in kpt_expert_prefixes):
+            kpt_params.append(param)
+        elif any(name.startswith(p) for p in action_expert_prefixes):
+            action_params.append(param)
+        else:
+            vlm_params.append(param)
+
+    param_groups = []
+    if vlm_params:
+        param_groups.append({
+            "params": vlm_params,
+            "lr": base_lr * config.vlm_lr_scale,
+            "name": "vlm_backbone",
+        })
+    if action_params:
+        param_groups.append({
+            "params": action_params,
+            "lr": base_lr * config.action_expert_lr_scale,
+            "name": "action_expert",
+        })
+    if kpt_params:
+        param_groups.append({
+            "params": kpt_params,
+            "lr": base_lr * config.kpt_expert_lr_scale,
+            "name": "kpt_expert",
+        })
+    if track_params:
+        param_groups.append({
+            "params": track_params,
+            "lr": base_lr * config.track_encoder_lr_scale,
+            "name": "track_encoder",
+        })
+
+    return param_groups
+```
 
 #### 完整单元测试
 
@@ -3441,6 +3876,54 @@ class TestTrainMetricsRegistration:
         for name in expected_names:
             assert isinstance(name, str)
             assert name.startswith("loss_kpt_")
+
+
+class TestOptimizerParamGroups:
+    """验证 per-module LR 分组逻辑（见 §14.3）。"""
+
+    def test_lr_scale_config_fields_exist(self):
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import (
+            InternVLAA15Config,
+        )
+
+        cfg = InternVLAA15Config()
+        assert hasattr(cfg, "vlm_lr_scale")
+        assert hasattr(cfg, "action_expert_lr_scale")
+        assert hasattr(cfg, "kpt_expert_lr_scale")
+        assert hasattr(cfg, "track_encoder_lr_scale")
+
+    def test_param_group_classification(self):
+        """模拟参数名分类逻辑，验证前缀匹配。"""
+        kpt_expert_prefixes = ("model.kpt_expert_layers.",)
+        track_encoder_prefixes = ("model.track_encoder.",)
+        action_expert_prefixes = ("model.action_expert_layers.",)
+
+        test_names = {
+            "model.kpt_expert_layers.0.self_attn.q_proj.weight": "kpt",
+            "model.track_encoder.patch_embed.weight": "track",
+            "model.action_expert_layers.0.mlp.gate.weight": "action",
+            "model.layers.0.self_attn.q_proj.weight": "vlm",
+            "model.embed_tokens.weight": "vlm",
+        }
+        for name, expected_group in test_names.items():
+            if any(name.startswith(p) for p in track_encoder_prefixes):
+                group = "track"
+            elif any(name.startswith(p) for p in kpt_expert_prefixes):
+                group = "kpt"
+            elif any(name.startswith(p) for p in action_expert_prefixes):
+                group = "action"
+            else:
+                group = "vlm"
+            assert group == expected_group, f"{name}: expected {expected_group}, got {group}"
+
+    def test_lr_scaling_computation(self):
+        """验证 LR 缩放计算的正确性。"""
+        base_lr = 5e-5
+        vlm_lr_scale = 0.05
+        track_lr_scale = 2.0
+
+        assert abs(base_lr * vlm_lr_scale - 2.5e-6) < 1e-10
+        assert abs(base_lr * track_lr_scale - 1e-4) < 1e-10
 
 
 class TestLoadAsSafetensorOverride:
