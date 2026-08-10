@@ -9,3 +9,4 @@ pyglet<2
 moviepy
 tyro
 h5py
+scipy

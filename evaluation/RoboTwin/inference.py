@@ -387,6 +387,9 @@ def infer_once(args: argparse.Namespace):
         try:
             task_env.setup_demo(now_ep_num=episode_id, seed=seed_value, is_test=True, **task_args)
             episode_info = task_env.play_once()
+            # check_success() requires self.robot, which close_env() sets to None,
+            # so the expert result must be captured before closing the env.
+            expert_success = bool(task_env.plan_success and task_env.check_success())
             maybe_close_env(task_env)
         except unstable_error as exc:
             logging.warning("Skipping unstable seed for task=%s seed=%s: %s", task_name, seed_value, exc)
@@ -402,12 +405,11 @@ def infer_once(args: argparse.Namespace):
             task_args["render_freq"] = render_freq
             continue
 
-        if task_env.plan_success and task_env.check_success():
-            successful_seed_count += 1
-        else:
+        if not expert_success:
             seed_cursor += 1
             task_args["render_freq"] = render_freq
             continue
+        successful_seed_count += 1
 
         task_args["render_freq"] = render_freq
         task_env.setup_demo(now_ep_num=episode_id, seed=seed_value, is_test=True, **task_args)

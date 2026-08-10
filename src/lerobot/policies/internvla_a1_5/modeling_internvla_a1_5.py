@@ -2180,7 +2180,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
             return self.parameters()
 
         model = self.model
-        kpt_modules = [
+        kpt_modules = [ #@# 加入了kpt模态,要对处理该模态的trf的参数设置是否可训练或不同的lr ???但其它的模块也要不同的冻结时刻与lr吧
             model.track_encoder,
             model.kpt_state_proj,
             model.keypoint_embedding,
@@ -2251,7 +2251,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
         fast_token_mask = batch.get(f"{OBS_PREFIX}fast_token_mask")
         state = self.prepare_state(batch)
 
-        kpt_kwargs = {}
+        kpt_kwargs = {} #@# 加了kpt模态,所以推理时也要把kpt输入加上
         if self.config.enable_keypoint_predictor:
             kpt_kwargs = {
                 "his_kpts": batch.get("observation.his_kpts"),
@@ -2381,7 +2381,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
         else:
             video_mask = None
 
-        kpt_kwargs = {}
+        kpt_kwargs = {}  #@# 增加了kpt模态,所以在forward时要增加相关输入
         if self.config.enable_keypoint_predictor:
             kpt_kwargs = {
                 "his_kpts": batch.get("observation.his_kpts"),
@@ -2456,7 +2456,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
                 # its K/V (see design doc §3 "indirect supervision").
                 loss_kpt_cur = zero
                 loss_kpt_fut = zero
-            loss_kpt = self.config.kpt_loss_weight * (
+            loss_kpt = self.config.kpt_loss_weight * (#???
                 loss_kpt_cur + self.config.kpt_future_loss_weight * loss_kpt_fut
             )
         else:
