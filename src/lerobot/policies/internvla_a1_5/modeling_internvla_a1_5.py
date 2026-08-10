@@ -2494,7 +2494,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
         else:
             loss_fm_action = losses.mean()
             loss_vlm = zero
-            loss = loss_fm_action + self.config.video_loss_weight * video_loss + loss_kpt
+            loss = self.config.action_loss_weight * loss_fm_action + self.config.video_loss_weight * video_loss + loss_kpt
             loss_dict = {
                 "loss": loss.item(),
                 # Action Expert branch
