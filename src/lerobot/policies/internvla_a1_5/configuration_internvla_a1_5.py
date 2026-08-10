@@ -8,6 +8,7 @@ from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.policies.internvla_a1_5.transform_internvla_a1_5 import (
+    Extract3DKeypointTransformFn,
     ExtractVideoFramesTransformFn,
     FASTInternVLAA15ActionTokenizerTransformFn,
     InternVLAA15ChatProcessorTransformFn,
@@ -32,6 +33,11 @@ class InternVLAA15DatasetConfig(DatasetConfig):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+
+    # GeoPredict 3D keypoint fusion (see v3.2 design doc §4). Disabled by default.
+    enable_keypoint_predictor: bool = False
+    num_keypoint_joints: int = 8
+    keypoint_history_max_len: int = 1000
 
     data_transforms: TransformGroup = field(
         default_factory=lambda: TransformGroup(
@@ -99,6 +105,31 @@ class InternVLAA15DatasetConfig(DatasetConfig):
                 t.chunk_size = self.chunk_size
                 break
 
+        inputs = [t for t in inputs if not isinstance(t, Extract3DKeypointTransformFn)]
+        if self.enable_keypoint_predictor:
+            kpt_extract = Extract3DKeypointTransformFn(
+                num_joints=self.num_keypoint_joints,
+                history_max_len=self.keypoint_history_max_len,
+                chunk_size=self.chunk_size,
+            )
+            # Insert right after NormalizeTransformFn (and before ComposeFieldsTransform), per
+            # v3.2 §4.4: the raw stacked `observation.keypoint_3d` delta window must still be
+            # normalization-free (kpt values are not part of NormalizeTransformFn's state/action
+            # normalization), so we simply place it right before ComposeFieldsTransform.
+            insert_idx = next(
+                (i for i, t in enumerate(inputs) if isinstance(t, ComposeFieldsTransform)),
+                len(inputs),
+            )
+            inputs.insert(insert_idx, kpt_extract)
+
+        for t in inputs:
+            if isinstance(t, UnifyInternVLAA15InputsTransformFn):
+                t.enable_keypoint_predictor = self.enable_keypoint_predictor
+                t.num_keypoint_joints = self.num_keypoint_joints
+                t.keypoint_history_max_len = self.keypoint_history_max_len
+                t.chunk_size = self.chunk_size
+                break
+
         self.data_transforms = replace(self.data_transforms, inputs=inputs)
 
 
@@ -114,6 +145,14 @@ class UnifyInternVLAA15InputsTransformFn(DataTransformFn):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+
+    # GeoPredict 3D keypoint fusion (see v3.2 design doc §4.5). When enabled, `data` is expected
+    # to already carry the 5 kpt fields produced upstream by Extract3DKeypointTransformFn
+    # (zero-filled there when the dataset has no `observation.keypoint_3d` column, i.e. Phase 1).
+    enable_keypoint_predictor: bool = False
+    num_keypoint_joints: int = 8
+    keypoint_history_max_len: int = 1000
+    chunk_size: int = 50
 
     def __call__(self, data: DataDict) -> DataDict:
         from lerobot.utils.constants import OBS_STATE, ACTION, OBS_STR
@@ -135,7 +174,7 @@ class UnifyInternVLAA15InputsTransformFn(DataTransformFn):
                 self.num_video_frames + 1, 3, self.video_height, self.video_width
             )
 
-        return {
+        result = {
             OBS_STATE: data[OBS_STATE],
             ACTION: data[ACTION],
             f"{OBS_STR}.pixel_values": data[f"{OBS_STR}.pixel_values"],
@@ -148,6 +187,26 @@ class UnifyInternVLAA15InputsTransformFn(DataTransformFn):
             "label_mode": label_mode,
             video_key: video_frames,
         }
+        if self.enable_keypoint_predictor:
+            result.update(_kpt_fields_passthrough_or_zero(data, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size))
+        return result
+
+
+def _kpt_fields_passthrough_or_zero(
+    data: DataDict, num_joints: int, history_max_len: int, chunk_size: int
+) -> DataDict:
+    """Return the 5 GeoPredict kpt fields, passed through from `data` if present, otherwise
+    zero-filled with `kpt_mask=False` (used for VQA samples, which never have 3D keypoints)."""
+    import torch
+
+    h, j, c = history_max_len, num_joints, chunk_size
+    return {
+        "observation.his_kpts": data.get("observation.his_kpts", torch.zeros(h, j, 3)),
+        "observation.his_len": data.get("observation.his_len", torch.tensor(0, dtype=torch.long)),
+        "observation.kpt_t": data.get("observation.kpt_t", torch.zeros(j, 3)),
+        "observation.kpt_future": data.get("observation.kpt_future", torch.zeros(c, j, 3)),
+        "observation.kpt_mask": data.get("observation.kpt_mask", torch.tensor(False)),
+    }
 
 
 @DataTransformFn.register_subclass("unify_internvla_a1_5_vqa_inputs")
@@ -162,6 +221,13 @@ class UnifyInternVLAA15VQAInputsTransformFn(DataTransformFn):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+
+    # See UnifyInternVLAA15InputsTransformFn above. VQA samples never carry real 3D keypoints,
+    # so when the keypoint predictor is enabled these are always zero-filled with kpt_mask=False.
+    enable_keypoint_predictor: bool = False
+    num_keypoint_joints: int = 8
+    keypoint_history_max_len: int = 1000
+    chunk_size: int = 50
 
     def __call__(self, data: DataDict) -> DataDict:
         from lerobot.utils.constants import OBS_STATE, ACTION, OBS_STR
@@ -179,7 +245,7 @@ class UnifyInternVLAA15VQAInputsTransformFn(DataTransformFn):
             self.num_video_frames + 1, 3, self.video_height, self.video_width
         )
 
-        return {
+        result = {
             OBS_STATE: data[OBS_STATE],
             ACTION: data[ACTION],
             f"{OBS_STR}.pixel_values": data[f"{OBS_STR}.pixel_values"],
@@ -192,6 +258,13 @@ class UnifyInternVLAA15VQAInputsTransformFn(DataTransformFn):
             "label_mode": label_mode,
             "observation.video_frames": video_frames,
         }
+        if self.enable_keypoint_predictor:
+            result.update(
+                _kpt_fields_passthrough_or_zero(
+                    {}, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size
+                )
+            )
+        return result
 
 
 @VQADatasetConfig.register_subclass("internvla_a1_5")
@@ -206,6 +279,13 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+
+    # GeoPredict 3D keypoint fusion: VQA samples never have real 3D keypoints, so these only
+    # control the shape of the zero-filled placeholders (see UnifyInternVLAA15VQAInputsTransformFn).
+    enable_keypoint_predictor: bool = False
+    num_keypoint_joints: int = 8
+    keypoint_history_max_len: int = 1000
+    chunk_size: int = 50
 
     data_transforms: TransformGroup = field(
         default_factory=lambda: TransformGroup(
@@ -244,6 +324,15 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
             len(inputs),
         )
         inputs.insert(insert_idx, InternVLAA15VQAProcessorTransformFn())
+
+        for t in inputs:
+            if isinstance(t, UnifyInternVLAA15VQAInputsTransformFn):
+                t.enable_keypoint_predictor = self.enable_keypoint_predictor
+                t.num_keypoint_joints = self.num_keypoint_joints
+                t.keypoint_history_max_len = self.keypoint_history_max_len
+                t.chunk_size = self.chunk_size
+                break
+
         self.data_transforms = replace(self.data_transforms, inputs=inputs)
 
 
@@ -343,6 +432,52 @@ class InternVLAA15Config(PreTrainedConfig):
     action_loss_only: bool = False
     freeze_learnable_tokens: bool = False
 
+    # ------------------------------------------------------------------
+    # GeoPredict 3D keypoint trajectory predictor fusion (three-path MoT).
+    # See b/d/itrnVLA15_GeoP_3dtrj_3cn2.md (v3.1, general design) and
+    # b/d/itrnVLA15_GeoP_3dtrj_3cn2_rbt2stak3.md (v3.2, RoboTwin aloha dual-arm adaptation).
+    # ------------------------------------------------------------------
+    enable_keypoint_predictor: bool = False
+    num_keypoint_joints: int = 8  # 8 for RoboCasa single-arm (GeoPredict default); 14 for aloha dual-arm.
+
+    # Loss weights. `action_loss_weight` replaces the previously hardcoded `10 *` multiplier.
+    action_loss_weight: float = 10.0
+    kpt_loss_weight: float = 1.0  # beta: overall keypoint loss weight (0.0 => Phase 1, indirect supervision only)
+    kpt_future_loss_weight: float = 1.0  # gamma: weight of the future-trajectory term relative to the current-frame term
+
+    # Keypoint expert architecture (mirrors ActionExpertConfig; head_dim/num_(kv_)heads inherited from the VLM).
+    kpt_expert_hidden_size: int = 1024
+    kpt_expert_intermediate_size: int = 3072
+
+    # Knowledge insulation / gradient routing for the keypoint path.
+    knowledge_insulation_kpt: bool = False  # detach VLM K/V when kpt expert queries attend to the prefix
+    kpt_to_action_detach: bool = False  # detach kpt expert K/V when the action expert queries attend to it
+    ki_gradient_scale: float = 0.0  # soft KI: action loss -> VLM gradient scale (0=hard KI, 1=no insulation)
+    ki_kpt_gradient_scale: float = 0.0  # soft KI: kpt loss -> VLM gradient scale (0=hard KI, 1=no insulation)
+
+    freeze_keypoint_modules: bool = False  # freeze TrackEncoder + kpt_expert + kpt_state_proj/keypoint_embedding/keypoint_out_proj
+
+    # Per-module learning-rate scales (multiplied against the base optimizer LR).
+    vlm_lr_scale: float = 1.0
+    action_expert_lr_scale: float = 1.0
+    kpt_expert_lr_scale: float = 1.0
+    track_encoder_lr_scale: float = 1.0
+
+    # Weight initialization.
+    init_kpt_expert_from_action: bool = True  # Stage 3: warm-start kpt_expert from action_expert weights
+    geopredict_checkpoint_path: str | None = None  # Stage 4: optional GeoPredict checkpoint for TrackEncoder init
+
+    # TrackEncoder hyperparameters (see keypoints.py::TrackEncoder).
+    keypoint_track_input_dim: int = 3
+    keypoint_track_patch_size: int = 4
+    keypoint_track_embed_dim: int = 256
+    keypoint_track_query_dim: int = 512
+    keypoint_track_num_heads: int = 8
+    keypoint_track_ff_dim: int = 1024
+    keypoint_history_max_len: int = 1000  # H: max number of history frames fed to TrackEncoder
+
+    keypoint_noise_sigma: float = 0.0  # optional additive Gaussian noise on kpt_t during training (0=disabled)
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -366,6 +501,12 @@ class InternVLAA15Config(PreTrainedConfig):
             )
         if self.inference_backend == "optimized" and not self.action_loss_only:
             raise ValueError("inference_backend='optimized' requires action_loss_only=True")
+        if self.enable_keypoint_predictor and self.num_keypoint_joints <= 0:
+            raise ValueError(f"num_keypoint_joints must be > 0, got {self.num_keypoint_joints}")
+        if self.kpt_loss_weight < 0:
+            raise ValueError(f"kpt_loss_weight must be >= 0, got {self.kpt_loss_weight}")
+        if self.kpt_future_loss_weight < 0:
+            raise ValueError(f"kpt_future_loss_weight must be >= 0, got {self.kpt_future_loss_weight}")
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""
@@ -424,3 +565,24 @@ class InternVLAA15Config(PreTrainedConfig):
     def image_delta_indices(self) -> list | None:
         n = self.num_video_frames + 1
         return [self.chunk_size * i // (n - 1) for i in range(n)]
+
+    @property
+    def keypoint_3d_delta_indices(self) -> list[int] | None:
+        """Delta-timestamp indices for `observation.keypoint_3d`, covering the full
+        [-H, ..., -1, 0, 1, ..., C] window (H history frames strictly before the current frame,
+        the current frame itself, and C future frames), or None when the keypoint predictor is
+        disabled (no extra column is requested from the dataset).
+
+        Note: v3.1 design doc §14.1 writes this as ``range(-H + 1, C + 1)`` with a comment
+        claiming "H+1+C" indices, but that formula actually yields only H+C indices (off-by-one).
+        We use ``range(-H, C + 1)`` here to get the intended H+1+C indices, consistent with
+        GeoPredict's own history-buffer convention (history is `keypoints[:step]`, i.e. exactly
+        H frames strictly before the current step, zero-padded — see
+        GeoPredict/data_processing/robocasa_dataset.py lines 79-90) and with the §4.3/§15.3
+        slicing convention (`[:H] -> his_kpts`, `[H] -> kpt_t`, `[H+1:H+1+C] -> kpt_future`).
+        """
+        if not self.enable_keypoint_predictor:
+            return None
+        h = self.keypoint_history_max_len
+        c = self.chunk_size
+        return list(range(-h, c + 1))  # H + 1 + C indices: [-H, ..., -1, 0, 1, ..., C]

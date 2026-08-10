@@ -126,6 +126,10 @@ def update_policy(
         train_metrics.loss_fast = output_dict["loss_fast"]
     if "loss_subtask" in output_dict:
         train_metrics.loss_subtask = output_dict["loss_subtask"]
+    if "loss_kpt_current" in output_dict:
+        train_metrics.loss_kpt_current = output_dict["loss_kpt_current"]
+    if "loss_kpt_future" in output_dict:
+        train_metrics.loss_kpt_future = output_dict["loss_kpt_future"]
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
@@ -312,6 +316,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if cfg.policy.type == "internvla_a1_5":
         train_metrics["loss_fast"] = AverageMeter("loss_fast", ":.3f")
         train_metrics["loss_subtask"] = AverageMeter("loss_subtask", ":.3f")
+
+    if getattr(cfg.policy, "enable_keypoint_predictor", False):
+        train_metrics["loss_kpt_current"] = AverageMeter("loss_kpt_cur", ":.4f")
+        train_metrics["loss_kpt_future"] = AverageMeter("loss_kpt_fut", ":.4f")
 
 
     # Use effective batch size for proper epoch calculation in distributed training

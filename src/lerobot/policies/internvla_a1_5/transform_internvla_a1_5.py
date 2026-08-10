@@ -651,3 +651,83 @@ class ExtractVideoFramesTransformFn(DataTransformFn):
                 if k in data and data[k].ndim == 4:
                     data[k] = data[k][0]
         return data
+
+
+@DataTransformFn.register_subclass("extract_3d_keypoint")
+@dataclass
+class Extract3DKeypointTransformFn(DataTransformFn):
+    """Split the delta-timestamp-stacked `observation.keypoint_3d` window into the 5 fields
+    consumed by InternVLAA15's keypoint expert path (GeoPredict fusion, see design docs
+    `b/d/itrnVLA15_GeoP_3dtrj_3cn2.md` §15.4 and `b/d/itrnVLA15_GeoP_3dtrj_3cn2_rbt2stak3.md` §4.4).
+
+    Expects (when the dataset has 3D keypoint ground truth, i.e. Phase 2 after offline FK
+    generation) `data["observation.keypoint_3d"]` of shape ``[H+1+C, num_joints*3]`` (flattened
+    per-frame) stacked via `InternVLAA15Config.keypoint_3d_delta_indices` (relative offsets
+    ``[-H, ..., -1, 0, 1, ..., C]``), and `data["observation.keypoint_3d_is_pad"]` of shape
+    ``[H+1+C]`` (True where the queried offset fell outside the episode boundary and was
+    clamped to the nearest valid frame by `LeRobotDataset._get_query_indices`).
+
+    Produces:
+        observation.his_kpts:   [H, J, 3] float32 -- valid history frames packed at the FRONT
+                                 (oldest-first, chronological), zero-padded at the back. This
+                                 matches GeoPredict's own convention
+                                 (`GeoPredict/data_processing/robocasa_dataset.py` lines 79-90:
+                                 `his_kpts[:kpts_.shape[0]] = kpts_`), which `TrackEncoder`
+                                 (ported in `keypoints.py`) assumes when slicing `points[i, :length]`.
+        observation.his_len:    [] long -- number of valid (non-clamped) history frames.
+        observation.kpt_t:      [J, 3] float32 -- current-frame keypoints.
+        observation.kpt_future: [C, J, 3] float32 -- future-frame keypoints (chunk_size steps).
+        observation.kpt_mask:   [] bool -- whether real 3D keypoint GT was available for this
+                                 sample at all (False in Phase 1, before FK generation).
+
+    In Phase 1 (dataset has no `observation.keypoint_3d` column at all), all 5 outputs are
+    zero-filled with `kpt_mask=False`, so downstream code (embed_kpt_suffix / loss computation)
+    can always assume these keys are present once `enable_keypoint_predictor=True`.
+    """
+
+    num_joints: int = 8
+    history_max_len: int = 1000
+    chunk_size: int = 50
+
+    def __call__(self, data: DataDict) -> DataDict:
+        h, j, c = self.history_max_len, self.num_joints, self.chunk_size
+        key = "observation.keypoint_3d"
+
+        if key not in data:
+            data["observation.his_kpts"] = torch.zeros(h, j, 3)
+            data["observation.his_len"] = torch.tensor(0, dtype=torch.long)
+            data["observation.kpt_t"] = torch.zeros(j, 3)
+            data["observation.kpt_future"] = torch.zeros(c, j, 3)
+            data["observation.kpt_mask"] = torch.tensor(False)
+            return data
+
+        stacked = data.pop(key)
+        if isinstance(stacked, np.ndarray):
+            stacked = torch.from_numpy(stacked)
+        stacked = stacked.reshape(h + 1 + c, j, 3).float()
+
+        is_pad = data.pop(f"{key}_is_pad", None)
+        if is_pad is None:
+            is_pad = torch.zeros(h + 1 + c, dtype=torch.bool)
+        elif isinstance(is_pad, np.ndarray):
+            is_pad = torch.from_numpy(is_pad)
+
+        hist_window = stacked[:h]  # [H, J, 3], relative offsets [-H, ..., -1], ascending chronological
+        hist_is_pad = is_pad[:h].bool()
+        num_invalid = int(hist_is_pad.sum().item())
+        his_len = h - num_invalid
+
+        his_kpts = torch.zeros(h, j, 3, dtype=stacked.dtype)
+        if his_len > 0:
+            # Invalid (clamped-to-episode-start) frames are contiguous at the FRONT of
+            # `hist_window` because they correspond to the most-negative (out-of-range) offsets.
+            # Move the valid, chronologically-ascending tail into the front of the output buffer,
+            # zero-padding the back, to match TrackEncoder's `points[i, :length]` convention.
+            his_kpts[:his_len] = hist_window[num_invalid:]
+
+        data["observation.his_kpts"] = his_kpts
+        data["observation.his_len"] = torch.tensor(his_len, dtype=torch.long)
+        data["observation.kpt_t"] = stacked[h]  # relative offset 0 (current frame)
+        data["observation.kpt_future"] = stacked[h + 1 : h + 1 + c]  # relative offsets [1, ..., C]
+        data["observation.kpt_mask"] = torch.tensor(True)
+        return data

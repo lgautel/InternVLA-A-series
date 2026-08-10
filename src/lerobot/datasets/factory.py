@@ -311,7 +311,12 @@ def resolve_delta_timestamps(
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
         elif key in action_keys and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
-        
+        elif key == "observation.keypoint_3d" and getattr(cfg, "keypoint_3d_delta_indices", None) is not None:
+            # GeoPredict 3D keypoint fusion (v3.1/v3.2 design docs §15.3/§4.3): only requested when
+            # the dataset actually has this column (Phase 2, after offline FK generation) AND the
+            # policy config enables the keypoint predictor.
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.keypoint_3d_delta_indices]
+
         if key in image_keys and hasattr(cfg, "image_delta_indices") and cfg.image_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.image_delta_indices]
 
