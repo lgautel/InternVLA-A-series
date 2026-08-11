@@ -364,6 +364,10 @@ def main() -> None:
     if args.visualize_future:
         config.inference_backend = "standard"
         config.action_loss_only = False
+    elif config.enable_keypoint_predictor:
+        # Optimized backend does not accept his_kpts; GeoP checkpoints need standard path.
+        config.inference_backend = "standard"
+        config.action_loss_only = True
     else:
         config.inference_backend = "optimized"
         config.action_loss_only = True
