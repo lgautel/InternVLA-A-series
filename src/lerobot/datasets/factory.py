@@ -416,6 +416,8 @@ def _build_single_dataset(
         if stat_path.exists():
             ext_stats = cast_stats_to_numpy(load_json(stat_path))
             logging.info(f"Using external stats from {stat_path}")
+            if base_ds.meta.stats is None:
+                base_ds.meta.stats = {}
             base_ds.meta.stats.update(ext_stats)
         else:
             raise FileNotFoundError(

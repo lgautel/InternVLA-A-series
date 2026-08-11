@@ -874,3 +874,526 @@ range(-1000, 51)  # 共 1051 个索引: [-1000, ..., -1, 0, 1, ..., 50]
 ---
 
 *文档版本: wrmup-v1.0 | 撰写日: 2026-08-10 | 对应代码库: itvlaGp v3.4 + GeoPredict kptsim*
+
+---
+
+# 方案 A 落地实施补充
+
+> 以下 §12-§14 补充 **方案 A（体素坐标原样注入）** 的可执行实施细节，包括注入脚本全文、代码修改、测试验收，使整个 Warmup 方案可直接落地。
+>
+> 目标数据路径更新为：`/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb/`
+
+---
+
+## 12. 方案 A 落地实施 —— 注入脚本与自包含数据
+
+### 12.1 关键技术发现：norm_stat 键名不匹配
+
+GeoPredict 与 itvlaGp 对归一化统计使用不同的键名：
+
+| 来源 | state 键 | action 键 |
+|:---|:---|:---|
+| GeoPredict `robotwin_norm_stats.json` | `"state"` | `"actions"` |
+| itvlaGp `NormalizeTransformFn` 期望 | `"observation.state"` | `"action"` |
+
+键名来源链路：
+
+```mermaid
+flowchart LR
+    subgraph GeoPredict
+        GP["robotwin_norm_stats.json<br/>keys: state, actions"]
+    end
+    subgraph itvlaGp
+        LS["load_stats → meta/stats.json"]
+        NS["NormalizeTransformFn.hydrate"]
+        SK["schema.get_state_keys → observation.state<br/>schema.get_action_keys → action"]
+    end
+    GP -->|"键名重映射"| LS
+    LS --> NS
+    SK --> NS
+```
+
+`NormalizeTransformFn.hydrate()`（[`core.py`](../src/lerobot/transforms/core.py) L273-276）从 `dataset.meta.stats` 取值，但 `selected_keys` 由 aloha schema 决定为 `["observation.state", "action"]`。若外部 stats 仍用 `"state"/"actions"` 键，归一化将被 **静默跳过**（仅产生 warning）。
+
+$$\text{注入脚本必须重映射：} \quad \texttt{"state"} \to \texttt{"observation.state"}, \quad \texttt{"actions"} \to \texttt{"action"}$$
+
+### 12.2 关键技术发现：`meta/stats.json` 缺失
+
+源数据集 `stack_bowls_three/` **无** `meta/stats.json`（仅有 `stats_gr00t.json`，格式不同且路径不匹配 `load_stats` 的 `STATS_PATH = "meta/stats.json"`）。`load_stats()` 返回 `None`，导致 [`factory.py`](../src/lerobot/datasets/factory.py) L419 的 `.update()` crash：
+
+```python
+# factory.py L419 — base_ds.meta.stats 为 None 时崩溃
+base_ds.meta.stats.update(ext_stats)  # AttributeError: 'NoneType' has no attribute 'update'
+```
+
+**解法**：双重保险——
+1. 注入脚本写入 `meta/stats.json`（键名已重映射），使 `load_stats()` 返回有效 dict；
+2. `factory.py` 加一行 None 防御（§13.1）。
+
+#### `episodes_stats.jsonl` 不影响训练，无需重算
+
+源数据集 `meta/` 下还有一个 `episodes_stats.jsonl`（LeRobot v2.1 格式的逐 episode 统计，每行一个 episode，含 `observation.state`、`action`、各 camera 的 min/max/mean/std/count）。该文件 **仅** 在 v2.1 → v3.0 数据集格式转换时被 [`convert_dataset_v21_to_v30.py`](../src/lerobot/datasets/v30/convert_dataset_v21_to_v30.py) 读取（[`utils.py`](../src/lerobot/datasets/utils.py) L69 声明为 `LEGACY_EPISODES_STATS_PATH`），用来聚合生成 `meta/stats.json`。**正常训练管线不会读取它。**
+
+注入后 **无需重新计算** `episodes_stats.jsonl`：
+- 训练管线通过 `meta/stats.json`（或 `--dataset.external_stats_path`）获取归一化统计，不读 `episodes_stats.jsonl`；
+- 注入脚本已在目标数据集写入 `meta/stats.json`（键名重映射后），训练所需 stats 已自包含；
+- `episodes_stats.jsonl` 里没有 `observation.keypoint_3d` 的统计，但 keypoint 本就不做归一化（体素空间 $[0, 1.6]^3$ 直接使用）。
+
+rsync 原样复制过去即可。
+
+### 12.3 输出数据集文件布局
+
+```
+stack_bowls_three_kptsim_lrb/
+├── data/
+│   └── chunk-000/
+│       ├── episode_000000.parquet    # 原列 + observation.keypoint_3d [42]
+│       ├── ...
+│       └── episode_000049.parquet
+├── meta/
+│   ├── info.json                     # 更新: +observation.keypoint_3d feature +coord 溯源
+│   ├── stats.json                    # 新增: 键名已重映射的归一化统计
+│   ├── keypoints_meta.json           # 新增: kptsim 溯源 (coord_offset, K, names)
+│   ├── episodes.jsonl                # 原样复制
+│   ├── episodes_stats.jsonl          # 原样复制
+│   ├── tasks.jsonl                   # 原样复制
+│   ├── modality.json                 # 原样复制
+│   └── ...
+├── videos/                           # 原样复制
+│   └── chunk-000/...
+└── norm_stat.json                    # 新增: 与 meta/stats.json 同内容, 自文档化
+```
+
+**自包含**：训练时只需指向此文件夹，无需外部 stats 路径：
+
+```bash
+--dataset.use_external_stats=true \
+--dataset.external_stats_path=/.../stack_bowls_three_kptsim_lrb/norm_stat.json
+```
+
+### 12.4 注入脚本：`util_scripts/inject_kptsim_keypoints.py`
+
+> **已落地**：完整代码见 [`util_scripts/inject_kptsim_keypoints.py`](../util_scripts/inject_kptsim_keypoints.py)
+
+参照 [`generate_aloha_keypoints.py`](../util_scripts/generate_aloha_keypoints.py) 的三阶段模式（copy → inject → update meta），但 GT 来源改为 kptsim npy，并增加 norm_stat 自包含逻辑。
+
+#### CLI 接口
+
+```bash
+python util_scripts/inject_kptsim_keypoints.py \
+  --source /home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three \
+  --kptsim_dir /home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim \
+  --dest /home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb \
+  --norm_stats_path /home/luogang/SRC/Robot/GeoPredict/ckpts/robotwin_norm_stats.json \
+  --coord_mode voxel \
+  --force
+```
+
+| 参数 | 说明 |
+|:---|:---|
+| `--source` | 只读 LeRobot 主数据（不修改） |
+| `--kptsim_dir` | 含 `episode_XXX/keypoints.npy` 与 `keypoints_meta.json` |
+| `--dest` | 输出目录（复制 source + 写入 keypoint 列 + norm stats） |
+| `--norm_stats_path` | GeoPredict 归一化统计 JSON（`state`/`actions` 键） |
+| `--coord_mode` | `voxel`（方案 A，默认）或 `footprint`（方案 B） |
+| `--force` | 覆盖已存在的 dest |
+| `--skip-copy` | dest 已有副本时仅重跑注入 |
+
+#### 执行流程
+
+```mermaid
+flowchart TD
+    A["1. rsync -a 复制数据集"] --> B["2. 加载 keypoints_meta.json<br/>验证 K=14, 关键点名"]
+    B --> C["3. 逐 episode 注入 keypoint 列<br/>读 npy → 写 parquet observation.keypoint_3d"]
+    C --> D["4. 更新 meta/info.json<br/>声明 feature + coord 溯源"]
+    D --> E["5. 创建自包含 stats<br/>键名重映射 → meta/stats.json + norm_stat.json"]
+    E --> F["6. 复制 keypoints_meta.json → meta/"]
+    F --> G["输出摘要: frames, min/max/mean XYZ"]
+```
+
+#### 核心函数说明
+
+| 函数 | 职责 |
+|:---|:---|
+| `_copy_dataset()` | rsync -a 复制，支持 `--force`/`--skip-copy`（与 FK 脚本相同） |
+| `_load_kptsim_meta()` | 加载并验证 `keypoints_meta.json`（K=14, 关键点名匹配） |
+| `_inject_keypoints_into_parquets()` | 逐 episode 读 npy，写 `df["observation.keypoint_3d"]` 列，逐行 flat `[42]` |
+| `_update_info_json()` | 在 `meta/info.json` 声明 feature（shape=[42], names），写入 `keypoint_coord_mode`/`keypoint_coord_offset` |
+| `_create_self_contained_stats()` | 重映射键名（`state→observation.state`, `actions→action`），写 `meta/stats.json` + `norm_stat.json` |
+| `_copy_provenance()` | 复制 `keypoints_meta.json` 到 `meta/`（溯源） |
+
+#### 与 FK 脚本（`generate_aloha_keypoints.py`）的差异
+
+| 维度 | FK 脚本 | kptsim 注入脚本 |
+|:---|:---|:---|
+| GT 来源 | 从 `observation.state` 经 Pinocchio FK 计算 | 读取 kptsim `keypoints.npy` |
+| 坐标系 | footprint-relative | 体素空间（world − coord_offset） |
+| EEF 名 | `left_camera` / `right_camera` | `fl_eef_tcp` / `fr_eef_tcp` |
+| 额外输出 | 无 | `norm_stat.json` + `meta/stats.json` + `keypoints_meta.json` |
+| 依赖 | pinocchio + URDF | 仅 numpy + pandas |
+
+#### Feature 命名（方案 A，与 kptsim 一致）
+
+```python
+KEYPOINT_NAMES = [
+    "fl_link1", "fl_link2", "fl_link3", "fl_link4", "fl_link5", "fl_link6", "fl_eef_tcp",
+    "fr_link1", "fr_link2", "fr_link3", "fr_link4", "fr_link5", "fr_link6", "fr_eef_tcp",
+]
+# observation.keypoint_3d names: fl_link1_x, fl_link1_y, ..., fr_eef_tcp_z  (共 42)
+```
+
+### 12.5 Symlink 注册
+
+```bash
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-${HF_HOME}/lerobot}"
+mkdir -p "${HF_LEROBOT_HOME}/robotwin"
+
+ln -sf /home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb \
+  ${HF_LEROBOT_HOME}/robotwin/stack_bowls_three_kptsim
+```
+
+训练时使用：`--dataset.repo_id=robotwin/stack_bowls_three_kptsim`
+
+### 12.6 训练命令中路径的更新
+
+> §6 Smoke Test 和 §7 正式 Warmup 中以下两处路径需对应更新：
+
+**NORM_STATS 指向数据集内部 `norm_stat.json`**（不再需要外部路径）：
+
+```bash
+# 原（指向外部 GeoPredict 路径）:
+NORM_STATS="/home/luogang/SRC/Robot/GeoPredict/ckpts/robotwin_norm_stats.json"
+
+# 改（指向自包含数据集内）:
+NORM_STATS="/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb/norm_stat.json"
+```
+
+注入后的 `norm_stat.json` 已完成键名重映射（`observation.state`/`action`），`meta/stats.json` 同内容。
+
+---
+
+## 13. 代码修改方案
+
+### 13.1 `factory.py`：external_stats None 防御（唯一改动）
+
+**文件**: [`src/lerobot/datasets/factory.py`](../src/lerobot/datasets/factory.py) L417-419
+
+**问题**: 当数据集无 `meta/stats.json` 时，`base_ds.meta.stats` 为 `None`，`.update()` 崩溃。
+
+**修改**:
+
+```python
+# 修改前 (L419):
+base_ds.meta.stats.update(ext_stats)
+
+# 修改后:
+if base_ds.meta.stats is None:
+    base_ds.meta.stats = {}
+base_ds.meta.stats.update(ext_stats)
+```
+
+> **影响范围**: 仅在 `use_external_stats=true` 且数据集无内建 stats 时触发。对已有 `meta/stats.json` 的数据集无影响（`load_stats()` 返回 dict，`is None` 为 False）。
+>
+> 本次注入脚本已在目标数据集写入 `meta/stats.json`（§12.4 Step 5），所以注入后此 None 路径不会触发。但作为防御性修复保留，避免其他无 stats 数据集复用此管线时 crash。
+
+### 13.2 无需修改的组件清单
+
+| 组件 | 文件 | 理由 |
+|:---|:---|:---|
+| Delta timestamp 查询 | `factory.py` L314-318 | 已通过 `keypoint_3d_delta_indices` 自动接入 |
+| `Extract3DKeypointTransformFn` | `transform_internvla_a1_5.py` L656-733 | 读 `observation.keypoint_3d` → 拆 5 字段，无坐标假设 |
+| `NormalizeTransformFn` | `core.py` L273-296 | 仅归一化 `observation.state` / `action`，keypoint 不归一化 |
+| Keypoint loss | `modeling_internvla_a1_5.py` | kpt_mask=True 时 loss 直接生效，无坐标硬编码 |
+| TrackEncoder | `keypoints.py` | 接收 `[J, 3]` float32，与坐标系解耦 |
+| 配置 | `configuration_internvla_a1_5.py` | `num_keypoint_joints=14` 已支持 |
+
+---
+
+## 14. 测试验收方案
+
+### 14.1 验收总览
+
+```mermaid
+flowchart LR
+    A["Layer 1<br/>注入静态检查<br/>(6 项断言)"] --> B["Layer 2<br/>LeRobotDataset<br/>加载测试"]
+    B --> C["Layer 3<br/>单卡 Smoke<br/>50 steps"]
+    C --> D["Layer 4<br/>正式 Warmup<br/>400 steps"]
+    style A fill:#e8f5e9
+    style B fill:#e3f2fd
+    style C fill:#fff3e0
+    style D fill:#fce4ec
+```
+
+### 14.2 Layer 1：注入结果静态检查
+
+> 注入脚本执行后立即运行，**不**依赖训练环境。
+
+#### Check 1: info.json feature 声明
+
+```bash
+python3 -c "
+import json
+DEST = '/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb'
+info = json.load(open(f'{DEST}/meta/info.json'))
+feat = info['features']['observation.keypoint_3d']
+assert feat['dtype'] == 'float32', f'dtype: {feat[\"dtype\"]}'
+assert feat['shape'] == [42], f'shape: {feat[\"shape\"]}'
+assert len(feat['names']) == 42, f'names count: {len(feat[\"names\"])}'
+assert feat['names'][0] == 'fl_link1_x'
+assert feat['names'][-1] == 'fr_eef_tcp_z'
+assert info['keypoint_coord_mode'] == 'voxel'
+assert len(info['keypoint_coord_offset']) == 3
+print('Check 1 PASS: info.json feature declaration OK')
+"
+```
+
+#### Check 2: 行数对齐 + 数值精确匹配（50 episodes）
+
+```bash
+python3 -c "
+import numpy as np, pandas as pd
+from pathlib import Path
+DEST = Path('/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb')
+KPTSIM = Path('/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim')
+for i in range(50):
+    df = pd.read_parquet(DEST / f'data/chunk-000/episode_{i:06d}.parquet')
+    kpts = np.load(KPTSIM / f'episode_{i:06d}/keypoints.npy')
+    assert len(df) == kpts.shape[0], f'ep {i}: {len(df)} vs {kpts.shape[0]}'
+    parquet_kpt = np.stack(df['observation.keypoint_3d'].tolist())
+    np.testing.assert_array_almost_equal(parquet_kpt, kpts, decimal=6)
+print('Check 2 PASS: row alignment + value match OK (50/50)')
+"
+```
+
+#### Check 3: 值域范围（方案 A 体素空间）
+
+```bash
+python3 -c "
+import pandas as pd, numpy as np
+from pathlib import Path
+DEST = Path('/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb')
+all_k = []
+for pq in sorted((DEST/'data/chunk-000').glob('*.parquet')):
+    df = pd.read_parquet(pq)
+    all_k.append(np.stack(df['observation.keypoint_3d'].tolist()))
+k = np.concatenate(all_k).reshape(-1, 3)
+print('min', k.min(0), 'max', k.max(0))
+assert k.min() >= -0.01, f'min too low: {k.min()}'
+assert k.max() <= 1.61, f'max too high: {k.max()}'
+print('Check 3 PASS: range OK, all within [0, 1.6]^3')
+"
+```
+
+#### Check 4: norm_stat.json 键名重映射 + 维度
+
+```bash
+python3 -c "
+import json
+DEST = '/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb'
+# Check norm_stat.json
+with open(f'{DEST}/norm_stat.json') as f:
+    d = json.load(f)
+assert 'observation.state' in d, f'Missing observation.state, got: {list(d.keys())}'
+assert 'action' in d, f'Missing action, got: {list(d.keys())}'
+assert 'state' not in d, 'Should not have raw \"state\" key'
+assert 'actions' not in d, 'Should not have raw \"actions\" key'
+assert len(d['observation.state']['mean']) == 14
+assert len(d['action']['mean']) == 14
+# Check meta/stats.json is identical
+with open(f'{DEST}/meta/stats.json') as f:
+    d2 = json.load(f)
+assert d == d2, 'norm_stat.json and meta/stats.json should be identical'
+print('Check 4 PASS: norm_stat.json key remapping OK (14-dim, observation.state/action)')
+"
+```
+
+#### Check 5: 溯源文件
+
+```bash
+python3 -c "
+import json
+from pathlib import Path
+DEST = Path('/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb')
+assert (DEST / 'meta' / 'keypoints_meta.json').exists()
+meta = json.load(open(DEST / 'meta' / 'keypoints_meta.json'))
+assert meta['K'] == 14
+assert 'coord_offset' in meta
+assert meta['keypoint_names'][6] == 'fl_eef_tcp'
+assert meta['keypoint_names'][13] == 'fr_eef_tcp'
+print('Check 5 PASS: provenance keypoints_meta.json OK')
+"
+```
+
+#### Check 6: 原列完整性
+
+```bash
+python3 -c "
+import pandas as pd
+DEST = '/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb'
+df = pd.read_parquet(f'{DEST}/data/chunk-000/episode_000000.parquet')
+required = ['observation.state', 'action', 'timestamp', 'frame_index',
+            'episode_index', 'index', 'task_index', 'observation.keypoint_3d']
+for col in required:
+    assert col in df.columns, f'Missing column: {col}'
+import numpy as np
+state = np.stack(df['observation.state'].tolist())
+assert state.shape[1] == 14, f'state dim: {state.shape[1]}'
+print(f'Check 6 PASS: all {len(required)} columns present, state dim=14')
+"
+```
+
+### 14.3 Layer 2：LeRobotDataset 加载测试
+
+> 依赖 itvlaGp conda 环境，验证 symlink + dataset 完整加载。
+
+```bash
+# 0. 先建 symlink（若未建）
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-${HF_HOME}/lerobot}"
+mkdir -p "${HF_LEROBOT_HOME}/robotwin"
+ln -sf /home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb \
+  ${HF_LEROBOT_HOME}/robotwin/stack_bowls_three_kptsim
+
+# 1. 加载测试
+cd /home/luogang/SRC/Robot/itvlaGp
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+ds = LeRobotDataset('robotwin/stack_bowls_three_kptsim')
+print('num_episodes:', ds.num_episodes)
+print('num_frames:', ds.num_frames)
+print('features:', list(ds.meta.features.keys()))
+print('stats is None:', ds.meta.stats is None)
+print('stats keys:', list(ds.meta.stats.keys()) if ds.meta.stats else 'N/A')
+item = ds[0]
+assert 'observation.keypoint_3d' in item
+kpt = item['observation.keypoint_3d']
+print('keypoint_3d shape:', kpt.shape, 'dtype:', kpt.dtype)
+print('Layer 2 PASS: LeRobotDataset load OK')
+"
+```
+
+### 14.4 Layer 3：单卡 Smoke 训练（50 steps）
+
+> 验证数据从注入列到 loss 的端到端通路。
+
+```bash
+cd /home/luogang/SRC/Robot/itvlaGp
+export WANDB_MODE=offline
+
+PRETRAINED_PATH="${PRETRAINED_PATH:-/path/to/InternVLA-A1.5-base}"
+GEOPREDICT_CKPT="${GEOPREDICT_CKPT:-/path/to/GeoPredict_robocasa.pth}"
+NORM_STATS="/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrb/norm_stat.json"
+
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 \
+  src/lerobot/scripts/lerobot_train.py \
+  --output_dir=outputs/internvla_a1_5/smoke_inject_verify \
+  --policy.type=internvla_a1_5 \
+  --policy.pretrained_path="${PRETRAINED_PATH}" \
+  --policy.push_to_hub=false \
+  --policy.dtype=bfloat16 \
+  --policy.optimizer_lr=5e-5 \
+  --policy.scheduler_warmup_steps=10 \
+  --policy.scheduler_decay_steps=50 \
+  --policy.scheduler_decay_lr=5e-6 \
+  --policy.vlm_model_name_or_path=Qwen/Qwen3.5-2B \
+  --policy.train_expert_only=true \
+  --policy.action_loss_only=true \
+  --policy.enable_vqa_loss=false \
+  --policy.tokenize_state=true \
+  --policy.freeze_learnable_tokens=true \
+  --policy.enable_keypoint_predictor=true \
+  --policy.num_keypoint_joints=14 \
+  --policy.action_loss_weight=2.0 \
+  --policy.kpt_loss_weight=10.0 \
+  --policy.kpt_future_loss_weight=2.0 \
+  --policy.knowledge_insulation=true \
+  --policy.knowledge_insulation_kpt=true \
+  --policy.kpt_to_action_detach=false \
+  --policy.action_expert_lr_scale=0.04 \
+  --policy.kpt_expert_lr_scale=1.0 \
+  --policy.track_encoder_lr_scale=1.0 \
+  --policy.init_kpt_expert_from_action=true \
+  --policy.geopredict_checkpoint_path="${GEOPREDICT_CKPT}" \
+  --dataset.type=internvla_a1_5 \
+  --dataset.repo_id=robotwin/stack_bowls_three_kptsim \
+  --dataset.enable_keypoint_predictor=true \
+  --dataset.num_keypoint_joints=14 \
+  --dataset.action_mode=abs \
+  --dataset.tokenize_state=true \
+  --dataset.use_external_stats=true \
+  --dataset.external_stats_path="${NORM_STATS}" \
+  --dataset.use_fast_action_tokens=true \
+  --seed=42 \
+  --batch_size=2 \
+  --steps=50 \
+  --save_freq=50 \
+  --log_freq=10 \
+  --wandb.enable=false
+```
+
+### 14.5 Pass/Fail 判据汇总
+
+| Layer | 检查项 | Pass 条件 | Fail 处置 |
+|:---:|:---|:---|:---|
+| 1-1 | info.json feature | dtype=float32, shape=[42], 42 names, coord 溯源 | 检查 `_update_info_json` |
+| 1-2 | 行数对齐 + 值匹配 | 50/50 episodes, decimal=6 精确 | 检查 episode index 对应 |
+| 1-3 | 值域范围 | $\min \geq -0.01$, $\max \leq 1.61$ | 检查 kptsim 提取或 coord_offset |
+| 1-4 | norm_stat 键名 | `observation.state`/`action`（非 `state`/`actions`），14 维 | 检查 `_create_self_contained_stats` |
+| 1-5 | 溯源文件 | `keypoints_meta.json` 存在, K=14 | 检查 `_copy_provenance` |
+| 1-6 | 原列完整 | 8 列全在, state dim=14 | 检查 rsync 或 parquet 写入是否丢列 |
+| 2 | Dataset 加载 | `LeRobotDataset` 无异常, `observation.keypoint_3d` 在 item 中 | 检查 symlink、info.json feature 声明 |
+| 3 | Smoke loss_kpt | step 10: `loss_kpt_current > 0`; step 50: 明显低于 step 10 | 见 §11 故障排查 |
+| 3 | Smoke 无 NaN/OOM | 50 steps 正常完成 | 降 batch_size 或检查 dtype |
+| 3 | TrackEncoder init | 日志含 `loaded N keys from GeoPredict` | 检查 `geopredict_checkpoint_path` |
+
+### 14.6 执行顺序小结（更新版）
+
+```mermaid
+flowchart TD
+    A0["0. factory.py 防御性修复<br/>(§13.1, 一行)"] --> A
+    A["1. 运行 inject_kptsim_keypoints.py<br/>(§12.4)"] --> B["2. Layer 1: 6 项断言<br/>(§14.2)"]
+    B --> C["3. Symlink 注册<br/>(§12.5)"]
+    C --> D["4. Layer 2: Dataset 加载<br/>(§14.3)"]
+    D --> E["5. Layer 3: Smoke 50 step<br/>(§14.4)"]
+    E --> F{"loss_kpt > 0 且下降?"}
+    F -->|是| G["6. 正式 Warmup 400 step<br/>(§7)"]
+    F -->|否| H["排查 §11 + §14.5"]
+    G --> I["7. 选 checkpoint → Phase 2<br/>(§8-§9)"]
+```
+
+---
+
+## 附录 E：norm_stat.json 键名重映射详解
+
+注入脚本的 `_create_self_contained_stats()` 执行以下转换：
+
+**输入**（GeoPredict `robotwin_norm_stats.json`）：
+```json
+{
+  "state": {"mean": [...14d...], "std": [...14d...], "q01": [...], "q99": [...]},
+  "actions": {"mean": [...14d...], "std": [...14d...], "q01": [...], "q99": [...]}
+}
+```
+
+**输出**（`norm_stat.json` / `meta/stats.json`）：
+```json
+{
+  "observation.state": {"mean": [...14d...], "std": [...14d...], "q01": [...], "q99": [...]},
+  "action": {"mean": [...14d...], "std": [...14d...], "q01": [...], "q99": [...]}
+}
+```
+
+映射规则：
+
+| GeoPredict 键 | itvlaGp 键 | 来源常量 |
+|:---|:---|:---|
+| `state` | `observation.state` | `OBS_STATE = "observation" + ".state"` |
+| `actions` | `action` | `ACTION = "action"` |
+
+`NormalizeTransformFn` 仅使用 `mean` 和 `std`（mode=`mean_std`），`q01`/`q99` 保留但不参与训练归一化。
+
+---
+
+*文档版本: wrmup-v1.1 | 更新日: 2026-08-10 | 新增: §12-14 方案 A 落地实施 + 代码修改 + 测试验收*
