@@ -36,6 +36,7 @@
   - [21. 已知问题与对策](#21-已知问题与对策)
   - [22. 配置对比表](#22-配置对比表)
 - [附录 A–D](#附录)
+- [附录 E: Video Loss 详解](#附录-e-video-loss-详解)
 
 ---
 
@@ -297,7 +298,7 @@ kpt_key_for_action = kpt_key.detach() if kpt_to_action_detach else kpt_key
 |:---|:---|:---|
 | `loss_action` | [B, C, D] | flow matching MSE (per-element) |
 | `loss_vqa` | [B] | VLM CE |
-| `video_loss` | scalar | WAN |
+| `video_loss` | scalar | WAN flow-matching MSE（详见 [附录 E](#附录-e-video-loss-详解)） |
 | `loss_kpt_current` / `loss_kpt_future` | [B] | 关键点 MSE |
 | `loss_per_token`, `token_mask` | 日志用 | |
 
@@ -939,7 +940,236 @@ Outputs:
 
 TrackEncoder 内部: PointPatch Conv1d patch=4 → ~250 patches/joint; CrossAttn query_dim=512; fusion Linear(512,1024).
 
+### 附录 E: Video Loss 详解
+
+> **定位**: 补充 §8 中对 `video_loss` 的一行摘要。说明 WAN 分支如何计算 loss、哪些模块参与、模块间如何协同，以及 **冻结 vs 训练** 的实际含义。
+>
+> **源码锚点**: [`_compute_video_loss`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) · [`wan_dit_forward`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) · [`ExtractVideoFramesTransformFn`](../src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) · [`_setup_wan_grad`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py)
+
+#### E.1 总览：video loss 在做什么
+
+InternVLA-A1.5 的 video 分支在 **冻结的 WAN 世界模型** 上做 **flow-matching 监督**：
+
+1. 用 **GT 未来视频**（`observation.video_frames`）经 **冻结 VAE** 编码为 latent；
+2. 对 latent 按随机 timestep 加噪；
+3. 用 **冻结 WAN DiT**，以 **learnable token 的 hidden state**（经 `learnable_to_wan_proj` 投影）作为 cross-attention condition，预测 velocity；
+4. 预测 velocity 与 flow-matching target 做 **MSE** → `loss_video`。
+
+**要点**: WAN 权重（VAE + DiT）**不更新**；`loss_video` 的梯度主要回到 **产生 `learnable_out` 的上游**（Action Expert，以及通过 MoT attention 连到的 VLM prefix 等）。WAN 在此充当 **固定的 video 评分器**，约束 policy 内部的 foresight 表征。
+
+总 loss 中（`enable_vqa_loss=true` 时，见 §8.2）：
+
+\[
+\mathcal{L} = w_{act}\mathcal{L}_{action} + \lambda_{vqa}\mathcal{L}_{vqa} + w_{vid}\mathcal{L}_{video} + \mathcal{L}_{kpt}
+\]
+
+其中 \(w_{vid}\) = `video_loss_weight`（默认 1.0）。`action_loss_only=true` 或 `video_loss_weight=0` 时跳过 video 分支。
+
+#### E.2 参与模块一览
+
+```mermaid
+flowchart TB
+    subgraph data [数据侧]
+        DS[LeRobot 多帧视频]
+        TVF[ExtractVideoFramesTransformFn]
+        DS --> TVF
+        TVF --> VF["observation.video_frames<br/>T,C,H,W in -1,1"]
+    end
+
+    subgraph vlm_path [VLM + MoT 主干]
+        IMG[当前帧图像 + 语言 prompt]
+        PREFIX[embed_prefix]
+        SUFFIX["embed_suffix: state + learnable + action_time"]
+        KPT[kpt suffix 可选]
+        MOT[qwen3_5_with_expert.forward]
+        IMG --> PREFIX
+        PREFIX --> MOT
+        SUFFIX --> MOT
+        KPT --> MOT
+        MOT --> SOUT[suffix_out]
+        SOUT --> LOUT["learnable_out<br/>suffix 第 1..N token hidden"]
+    end
+
+    subgraph bridge [WAN 桥接层]
+        LT[learnable_tokens + in_proj]
+        PROJ[learnable_to_wan_proj]
+        LOUT --> PROJ
+        LT -.-> SUFFIX
+    end
+
+    subgraph wan_frozen [WAN 分支 权重冻结]
+        VAE[Wan2_2_VAE encode]
+        DIT[WAN DiT blocks]
+        VF --> VAE
+        VAE --> LAT[clean_latent + noisy_latent]
+        PROJ --> CTX[wan_context]
+        LAT --> DIT
+        CTX --> DIT
+        DIT --> VPRED[video_pred]
+    end
+
+    subgraph loss_node [Loss]
+        VTGT["video_target = noise - clean"]
+        VPRED --> MSE[MSE mean]
+        VTGT --> MSE
+        MSE --> LV[loss_video]
+    end
+```
+
+| 模块 | 作用 | 权重是否更新 |
+|:---|:---|:---:|
+| `ExtractVideoFramesTransformFn` | 从相机多帧序列抽出 `observation.video_frames`；VLM 侧只保留 `frame[0]` | — |
+| **VLM prefix**（图像+语言） | 为 suffix 提供上下文 | 由 `train_expert_only` 控制 |
+| **Action Expert suffix** | 处理 `[state] [learnable×N] [action×chunk]` | 同上 |
+| `learnable_tokens` + `learnable_tokens_in_proj` | 50 个 foresight token 嵌入 | 由 `freeze_learnable_tokens` 控制 |
+| `learnable_to_wan_proj` | learnable hidden → WAN cross-attn context | `freeze_learnable_tokens=true` 时 **一并冻结** |
+| **WAN VAE** | 像素视频 → latent | **否**（代码 **恒** `requires_grad=False` + `no_grad` encode） |
+| **WAN DiT** | latent 上预测 flow-matching velocity | **否**（`freeze_wan_dit=true`，默认） |
+| `fm_video_scheduler` | 采样 σ、构造 noisy latent 与 target | 无参数 |
+
+**「加载、前向用」vs「冻结」**: WAN VAE 在文档中有时写作「加载、前向用」，本质是 **冻结**——参与 forward、不参与 optimizer；与 DiT 在 `freeze_wan_dit=true` 下的行为一致。VAE 无单独 CLI 开关，代码里 **无条件冻结**。
+
+#### E.3 数据：`observation.video_frames`
+
+[`ExtractVideoFramesTransformFn`](../src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) 在 `image_delta_indices` 产生 `[T,C,H,W]` 时：
+
+- 写入 `observation.video_frames`（归一化到 `[-1,1]`）供 WAN 监督；
+- 各相机 key 只保留 **第 0 帧** 供 Qwen VLM。
+
+即 **VLM 看当前帧，WAN 看未来多帧序列**。
+
+#### E.4 `learnable_out` 从哪来（与 action 共用一次 forward）
+
+Suffix 布局（[`embed_suffix`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py)）：
+
+```
+[state(1)] [learnable(N=50)] [action_time(chunk_size)]
+```
+
+Training step 流程：
+
+1. 对 action 做 flow-matching 加噪 → `x_t`；
+2. `embed_prefix` + `embed_suffix` + 可选 `embed_kpt_suffix` → **一次** MoT `forward` → `suffix_out`；
+3. [`get_learnable_token_output(suffix_out)`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) 切片 `[1 : 1+N]` 得 `learnable_out`。
+
+**video loss 与 action loss 共用同一次 MoT forward**，不是单独再跑 VLM。
+
+> ⚠️ **已知 bug（§21 #8）**: `get_learnable_token_output` 固定 `start=1` 以跳过 state token；当 `tokenize_state=True` 时 suffix **无** state token，会误跳过第一个 learnable token。**仅影响 WAN/video 分支**。
+
+#### E.5 `_compute_video_loss` 逐步
+
+**Step A — learnable → WAN context**
+
+```python
+wan_context = self.learnable_to_wan_proj(learnable_out)  # [B, N, wan_dim]
+```
+
+`wan_context` 作为 DiT 的 **cross-attention K/V**（跳过 WAN 原文 `text_embedding`）。语义：把「观测+语言+state+动作去噪过程」压缩进 learnable token，再投影为 WAN 可读 condition，预测未来 video latent。
+
+**Step B — 冻结 VAE 编码 GT**
+
+```python
+with torch.no_grad():
+    clean_latent = self.wan_video_model.encode_video(video_bcthw)       # 全序列
+    cond_latent  = self.wan_video_model.encode_video(first_frame_bcthw) # 仅第 0 帧
+```
+
+**Step C — flow-matching 加噪与 target**
+
+```python
+noisy_latent = clean_latent * (1 - sigma) + video_noise * sigma
+noisy_latent[:, :, 0:1] = cond_latent          # teacher forcing：首帧保持干净
+video_target = video_noise - clean_latent      # velocity target
+video_target[:, :, 0:1] = 0
+```
+
+与 action flow-matching 同族：随机 σ，target 为 velocity \(\epsilon - x_0\)。
+
+**Step D — 冻结 DiT 预测 + MSE**
+
+```python
+video_pred = self.wan_dit_forward(noisy_latent, wan_context, video_t)
+video_pred[:, :, 0:1] = 0
+return F.mse_loss(video_pred, video_target, reduction="mean")
+```
+
+DiT 内部：patch embed → time embedding → blocks（cross-attn 吃 `wan_context`）→ head → unpatchify。
+
+**Step E — 跳过条件**
+
+[`InternVLAA15.forward`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) 中：`action_loss_only=true` 或 `video_loss_weight=0.0` → `loss_video=0`；否则需 batch 含有效 `video_frames`（`video_mask` 过滤）。
+
+#### E.6 一次 training step 的协同时序
+
+```mermaid
+sequenceDiagram
+    participant Batch as Batch
+    participant VLM as VLM_prefix
+    participant AE as ActionExpert_suffix
+    participant Kpt as KptExpert
+    participant WAN as WAN_VAE_DiT_frozen
+
+    Batch->>VLM: 当前帧 + prompt
+    Batch->>AE: state + noisy_action + learnable_emb
+    Batch->>Kpt: his_kpts 等
+    VLM->>AE: prefix 联合 attention
+    Kpt->>AE: kpt 路径联合 attention
+    AE->>AE: suffix_out
+    AE->>AE: action_out → loss_action
+    AE->>AE: learnable_out slice
+
+    Batch->>WAN: GT video_frames
+    Note over WAN: VAE encode in no_grad
+    AE->>WAN: learnable_to_wan_proj → wan_context
+    WAN->>WAN: DiT → video_pred
+    WAN->>AE: MSE → loss_video 反传至 learnable_out 上游
+```
+
+协同要点：
+
+1. **同图计算**：action / vqa / kpt / video 共用一次 MoT forward；
+2. **WAN 是固定评分器**：不更新 WAN，只要求当前 learnable 表征能解释 GT 视频的 flow-matching dynamics；
+3. **condition 来自 policy**：learnable token 替代 WAN 的 text condition；
+4. **首帧 teacher forcing**：第 0 帧 latent 固定，主要监督 **未来帧** 演化。
+
+#### E.7 冻结配置下的梯度路径
+
+[`_setup_wan_grad`](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py)：
+
+```python
+for p in self.wan_video_model.vae.model.parameters():
+    p.requires_grad = False                    # VAE 恒冻结
+if self.config.freeze_wan_dit:
+    for p in self.wan_video_model.wan_model.parameters():
+        p.requires_grad = False                # DiT 可配置冻结
+if self.config.freeze_learnable_tokens:
+    for p in self.learnable_to_wan_proj.parameters():
+        p.requires_grad = False                # proj 随 foresight token 一并冻结
+```
+
+| 组件 | 权重更新 | 能否收到 `loss_video` 梯度 |
+|:---|:---:|:---:|
+| WAN VAE | 否 | 否（`no_grad` encode） |
+| WAN DiT | 否 | 否（参数 frozen；梯度止于 `wan_context` 输入侧） |
+| `learnable_tokens` / `in_proj` | 由 `freeze_learnable_tokens` | 否（frozen 时 token 值不更新） |
+| `learnable_to_wan_proj` | `freeze_learnable_tokens=true` 时否 | 梯度 **穿过** proj 到 `learnable_out`，**不更新** proj 权重 |
+| **Action Expert** | 是（`train_expert_only=false`） | **是**（经 `learnable_out`） |
+| **VLM** | 是 | **可能**（prefix↔suffix 联合 attention） |
+| Kpt Expert | 是 | 可能（三路径 attention 连通时） |
+
+典型 finetune 配置（`freeze_learnable_tokens=true`, `freeze_wan_dit=true`）：**video loss 训练 Action Expert / VLM，不训练 WAN 与 foresight token 参数本身**，但 foresight token **位置上的激活**仍随上游层更新。
+
+#### E.8 与 Phase 1 / 方案 B 的关系
+
+| 场景 | WAN 加载 | `loss_video` |
+|:---|:---:|:---:|
+| Phase 1 Warmup (`action_loss_only=true`) | 否 | **恒为 0** |
+| 标准 finetune / Phase 2 全训 | 是 | **非零**（有 video 帧时） |
+| 方案 B 080719 (`video_loss_weight=0`) | 是（占显存） | **恒为 0**（forward 跳过 `_compute_video_loss`） |
+
+Phase 2 全训方案（见 [sft_rbt2](itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.md)）：`action_loss_only=false`, `video_loss_weight=1`, `freeze_wan_dit=true` → **有 video 监督、WAN 不训**。
+
 ---
 
-> **文档版本**: v3.4 | 撰写日 2026-08-10 | 对照 itvlaGp 代码库  
-> **参考**: [modeling_internvla_a1_5.py](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) | [configuration_internvla_a1_5.py](../src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | [keypoints.py](../src/lerobot/policies/internvla_a1_5/keypoints.py) | [sft_rbt2_2](itrnVLA15_GeoP_3dtrj_3cn2_sft_rbt2_2.md) | [080719 launch](../launch/internvla_a15_geop_phase2_finetune_stackb3_080719.sh)
+> **文档版本**: v3.4 | 撰写日 2026-08-10 | 附录 E 增补 2026-08-11  
+> **参考**: [modeling_internvla_a1_5.py](../src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py) | [configuration_internvla_a1_5.py](../src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py) | [keypoints.py](../src/lerobot/policies/internvla_a1_5/keypoints.py) | [sft_rbt2_2](itrnVLA15_GeoP_3dtrj_3cn2_sft_rbt2_2.md) | [sft_rbt2](itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.md) | [080719 launch](../launch/internvla_a15_geop_phase2_finetune_stackb3_080719.sh)
