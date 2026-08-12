@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 import shutil
 import sys
 import traceback
 from collections import deque
 from pathlib import Path
+from typing import Literal
 
 import imageio
 import numpy as np
@@ -47,6 +49,13 @@ ALOHA_KEYPOINT_LINKS = [
     "fr_link1", "fr_link2", "fr_link3", "fr_link4", "fr_link5", "fr_link6", "right_camera",
 ]
 
+KPTSIM_LEFT_ARM_LINKS = ["fl_link1", "fl_link2", "fl_link3", "fl_link4", "fl_link5", "fl_link6"]
+KPTSIM_RIGHT_ARM_LINKS = ["fr_link1", "fr_link2", "fr_link3", "fr_link4", "fr_link5", "fr_link6"]
+
+DEFAULT_KPT_META_PATH = Path(
+    "/home/luogang/share/zwy/Projects/DATA/RoboTwin-Clean/stack_bowls_three_kptsim_lrbv30/meta/keypoints_meta.json"
+)
+
 
 def get_keypoints_aloha(robot_entity, footprint_pose=None):
     """Extract 14 keypoint 3D positions (footprint-relative) from SAPIEN aloha robot.
@@ -75,6 +84,83 @@ def get_keypoints_aloha(robot_entity, footprint_pose=None):
         keypoints[i] = (fp_rot_inv @ (world_pos - fp_pos)).astype(np.float32)
 
     return keypoints, footprint_pose
+
+
+def load_kptsim_coord_offset(meta_path: Path) -> np.ndarray:
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    offset = meta.get("coord_offset")
+    if offset is None:
+        raise KeyError(f"'coord_offset' missing in {meta_path}")
+    return np.asarray(offset, dtype=np.float64)
+
+
+def resolve_kpt_meta_path(ckpt_path: Path, explicit_path: Path | None) -> Path:
+    if explicit_path is not None:
+        if not explicit_path.exists():
+            raise FileNotFoundError(f"kpt meta not found: {explicit_path}")
+        return explicit_path
+
+    train_config_path = ckpt_path / "train_config.json"
+    if train_config_path.exists():
+        with open(train_config_path, encoding="utf-8") as f:
+            train_config = json.load(f)
+        external_stats = train_config.get("dataset", {}).get("external_stats_path")
+        if external_stats and "kptsim" in str(external_stats):
+            stats_path = Path(external_stats)
+            for candidate in (
+                stats_path.parent / "meta" / "keypoints_meta.json",
+                stats_path.parent.parent / "meta" / "keypoints_meta.json",
+            ):
+                if candidate.exists():
+                    return candidate
+
+    if DEFAULT_KPT_META_PATH.exists():
+        return DEFAULT_KPT_META_PATH
+
+    raise FileNotFoundError(
+        "Could not resolve kptsim keypoints_meta.json. Pass --kpt-meta-path explicitly."
+    )
+
+
+def get_keypoints_kptsim_voxel(robot_entity, robot_wrapper, coord_offset: np.ndarray) -> np.ndarray:
+    """Extract 14 keypoints in kptsim voxel space: world_pos - coord_offset."""
+    offset = np.asarray(coord_offset, dtype=np.float64)
+    keypoints = np.zeros((14, 3), dtype=np.float32)
+
+    for i, link_name in enumerate(KPTSIM_LEFT_ARM_LINKS):
+        link = robot_entity.find_link_by_name(link_name)
+        world_pos = np.asarray(link.get_pose().p, dtype=np.float64)
+        keypoints[i] = (world_pos - offset).astype(np.float32)
+
+    left_tcp = robot_wrapper.get_left_tcp_pose()
+    keypoints[6] = (np.asarray(left_tcp[:3], dtype=np.float64) - offset).astype(np.float32)
+
+    for i, link_name in enumerate(KPTSIM_RIGHT_ARM_LINKS):
+        link = robot_entity.find_link_by_name(link_name)
+        world_pos = np.asarray(link.get_pose().p, dtype=np.float64)
+        keypoints[7 + i] = (world_pos - offset).astype(np.float32)
+
+    right_tcp = robot_wrapper.get_right_tcp_pose()
+    keypoints[13] = (np.asarray(right_tcp[:3], dtype=np.float64) - offset).astype(np.float32)
+
+    return keypoints
+
+
+def extract_runtime_keypoints(
+    robot_entity,
+    robot_wrapper,
+    *,
+    coord_mode: Literal["footprint", "voxel"],
+    coord_offset: np.ndarray | None,
+    footprint_pose=None,
+):
+    if coord_mode == "voxel":
+        if coord_offset is None:
+            raise ValueError("coord_offset is required for voxel keypoint mode.")
+        return get_keypoints_kptsim_voxel(robot_entity, robot_wrapper, coord_offset), None
+
+    return get_keypoints_aloha(robot_entity, footprint_pose)
 
 
 TASK_NAMES = [
@@ -147,8 +233,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--infer-horizon", type=int, default=20)
     parser.add_argument("--inference-backend", choices=("standard", "optimized"), default="standard")
+    parser.add_argument(
+        "--kpt-coord-mode",
+        choices=("footprint", "voxel"),
+        default=None,
+        help="Runtime keypoint coordinate mode. Default: auto from train_config (kptsim -> voxel).",
+    )
+    parser.add_argument(
+        "--kpt-meta-path",
+        type=Path,
+        default=None,
+        help="Path to kptsim keypoints_meta.json (required for voxel mode unless auto-resolved).",
+    )
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
+
+
+def resolve_kpt_coord_mode(args: argparse.Namespace) -> Literal["footprint", "voxel"]:
+    if args.kpt_coord_mode is not None:
+        return args.kpt_coord_mode
+
+    train_config_path = args.ckpt_path / "train_config.json"
+    if train_config_path.exists():
+        with open(train_config_path, encoding="utf-8") as f:
+            train_config = json.load(f)
+        external_stats = str(train_config.get("dataset", {}).get("external_stats_path", ""))
+        if "kptsim" in external_stats:
+            return "voxel"
+
+    return "footprint"
 
 
 def require_robotwin():
@@ -232,9 +345,23 @@ def load_stats(ckpt_path: Path, stats_key: str):
         raise KeyError(f"stats_key '{stats_key}' not found in {ckpt_path / 'stats.json'}")
 
     selected = stats[stats_key]
-    stat_keys = ["min", "max", "mean", "std"]
-    state_stat = {OBS_STATE: {k: np.asarray(selected[OBS_STATE][k]) for k in stat_keys}}
-    action_stat = {ACTION: {k: np.asarray(selected[ACTION][k]) for k in stat_keys}}
+
+    def pick_feature_stats(feature_key: str) -> dict:
+        feature_stats = selected[feature_key]
+        picked: dict[str, np.ndarray] = {}
+        for key in ("mean", "std", "min", "max", "q01", "q99"):
+            if key in feature_stats:
+                picked[key] = np.asarray(feature_stats[key])
+        if "mean" not in picked or "std" not in picked:
+            raise KeyError(f"{feature_key} must contain mean/std in {ckpt_path / 'stats.json'}")
+        if "min" not in picked and "q01" in picked:
+            picked["min"] = picked["q01"]
+        if "max" not in picked and "q99" in picked:
+            picked["max"] = picked["q99"]
+        return picked
+
+    state_stat = {OBS_STATE: pick_feature_stats(OBS_STATE)}
+    action_stat = {ACTION: pick_feature_stats(ACTION)}
     return state_stat, action_stat
 
 
@@ -358,6 +485,19 @@ def infer_once(args: argparse.Namespace):
 
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
     policy, device, config = load_policy(args, dtype)
+    kpt_coord_mode = resolve_kpt_coord_mode(args)
+    kpt_coord_offset = None
+    if kpt_coord_mode == "voxel":
+        kpt_meta_path = resolve_kpt_meta_path(args.ckpt_path, args.kpt_meta_path)
+        kpt_coord_offset = load_kptsim_coord_offset(kpt_meta_path)
+        logging.info(
+            "Using kptsim voxel keypoints from %s offset=%s",
+            kpt_meta_path,
+            np.round(kpt_coord_offset, 4).tolist(),
+        )
+    else:
+        logging.info("Using footprint-relative keypoints (get_keypoints_aloha).")
+
     state_stat, action_stat = load_stats(args.ckpt_path, args.stats_key)
     input_transforms = build_input_transforms(args.resize_size, state_stat, args.stats_key, config)
     unnormalize_fn = UnNormalizeTransformFn(
@@ -430,6 +570,7 @@ def infer_once(args: argparse.Namespace):
             his_kpts = np.zeros((H, J, 3), dtype=np.float32)
             his_len = 0
             footprint_pose = None
+            logged_kpt_range = False
 
         while task_env.take_action_cnt < task_env.step_lim:
             observation = task_env.get_obs()
@@ -441,7 +582,20 @@ def infer_once(args: argparse.Namespace):
 
             if use_kpt:
                 robot_entity = task_env.robot.left_entity
-                kpt_t, footprint_pose = get_keypoints_aloha(robot_entity, footprint_pose)
+                kpt_t, footprint_pose = extract_runtime_keypoints(
+                    robot_entity,
+                    task_env.robot,
+                    coord_mode=kpt_coord_mode,
+                    coord_offset=kpt_coord_offset,
+                    footprint_pose=footprint_pose,
+                )
+                if kpt_coord_mode == "voxel" and not logged_kpt_range:
+                    logging.info(
+                        "First voxel keypoint frame range: min=%s max=%s",
+                        np.round(kpt_t.min(axis=0), 4).tolist(),
+                        np.round(kpt_t.max(axis=0), 4).tolist(),
+                    )
+                    logged_kpt_range = True
                 if his_len < H:
                     his_kpts[his_len] = kpt_t
                 else:
