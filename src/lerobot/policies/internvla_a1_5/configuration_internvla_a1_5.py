@@ -33,6 +33,8 @@ class InternVLAA15DatasetConfig(DatasetConfig):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+    # Used by ChatProcessor / FAST tokenizer transforms (independent of policy.vlm_model_name_or_path).
+    vlm_model_name_or_path: str = "Qwen/Qwen3.5-2B"
 
     # GeoPredict 3D keypoint fusion (see v3.2 design doc §4). Disabled by default.
     enable_keypoint_predictor: bool = False
@@ -51,9 +53,9 @@ class InternVLAA15DatasetConfig(DatasetConfig):
                 ExtractVideoFramesTransformFn(),
                 NormalizeTransformFn(),
                 ComposeFieldsTransform(),
-                FASTInternVLAA15ActionTokenizerTransformFn(),
+                # ChatProcessor / FAST tokenizer are inserted in __post_init__ so they
+                # pick up `vlm_model_name_or_path` (avoids a spurious HF download from defaults).
                 LoadActionTextFromJsonlTransformFn(),
-                InternVLAA15ChatProcessorTransformFn(),
                 PadStateAndActionTransformFn(
                     max_state_dim=InternVLAA15DatasetConfig.max_state_dim,
                     max_action_dim=InternVLAA15DatasetConfig.max_action_dim,
@@ -86,6 +88,7 @@ class InternVLAA15DatasetConfig(DatasetConfig):
             max_length=self.max_prompt_length,
             use_fast_action_tokens=self.use_fast_action_tokens,
             mode=self.mode,
+            pretrained_model_name_or_path=self.vlm_model_name_or_path,
         )
         inputs = [t for t in inputs if not isinstance(t, InternVLAA15ChatProcessorTransformFn)]
         insert_idx = next(
@@ -94,16 +97,17 @@ class InternVLAA15DatasetConfig(DatasetConfig):
         )
         inputs.insert(insert_idx, processor)
 
-        has_fast = any(isinstance(t, FASTInternVLAA15ActionTokenizerTransformFn) for t in inputs)
-        if self.use_fast_action_tokens and not has_fast:
-            inputs.insert(insert_idx, FASTInternVLAA15ActionTokenizerTransformFn())
-        elif not self.use_fast_action_tokens and has_fast:
-            inputs = [t for t in inputs if not isinstance(t, FASTInternVLAA15ActionTokenizerTransformFn)]
-
-        for t in inputs:
-            if isinstance(t, FASTInternVLAA15ActionTokenizerTransformFn):
-                t.chunk_size = self.chunk_size
-                break
+        # Rebuild FAST tokenizer so qwen35_model_name follows vlm_model_name_or_path
+        # (default_factory otherwise loads the hardcoded HF id at transform construction time).
+        inputs = [t for t in inputs if not isinstance(t, FASTInternVLAA15ActionTokenizerTransformFn)]
+        if self.use_fast_action_tokens:
+            inputs.insert(
+                insert_idx,
+                FASTInternVLAA15ActionTokenizerTransformFn(
+                    qwen35_model_name=self.vlm_model_name_or_path,
+                    chunk_size=self.chunk_size,
+                ),
+            )
 
         inputs = [t for t in inputs if not isinstance(t, Extract3DKeypointTransformFn)]
         if self.enable_keypoint_predictor:
@@ -279,6 +283,7 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+    vlm_model_name_or_path: str = "Qwen/Qwen3.5-2B"
 
     # GeoPredict 3D keypoint fusion: VQA samples never have real 3D keypoints, so these only
     # control the shape of the zero-filled placeholders (see UnifyInternVLAA15VQAInputsTransformFn).
@@ -300,7 +305,7 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
                     max_state_dim=InternVLAA15VQADatasetConfig.max_state_dim,
                     max_action_dim=InternVLAA15VQADatasetConfig.max_action_dim,
                 ),
-                InternVLAA15VQAProcessorTransformFn(),
+                # VQA processor is inserted in __post_init__ with vlm_model_name_or_path.
                 UnifyInternVLAA15VQAInputsTransformFn(
                     num_video_frames=InternVLAA15VQADatasetConfig.num_video_frames,
                     video_height=InternVLAA15VQADatasetConfig.video_height,
@@ -323,7 +328,12 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
             ),
             len(inputs),
         )
-        inputs.insert(insert_idx, InternVLAA15VQAProcessorTransformFn())
+        inputs.insert(
+            insert_idx,
+            InternVLAA15VQAProcessorTransformFn(
+                pretrained_model_name_or_path=self.vlm_model_name_or_path,
+            ),
+        )
 
         for t in inputs:
             if isinstance(t, UnifyInternVLAA15VQAInputsTransformFn):

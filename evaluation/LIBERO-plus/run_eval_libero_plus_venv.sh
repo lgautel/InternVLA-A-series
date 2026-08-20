@@ -295,7 +295,10 @@ PY
       cd "${PROJ_ROOT}"
       export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_DIR}"
       export MAGICK_HOME="${CLIENT_VENV}"
-      export LD_LIBRARY_PATH="${CLIENT_VENV}/lib:${LD_LIBRARY_PATH:-}"
+      export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${CLIENT_VENV}/lib:${LD_LIBRARY_PATH:-}"
+      export __EGL_VENDOR_LIBRARY_DIRS="${__EGL_VENDOR_LIBRARY_DIRS:-${HOME}/.local/share/glvnd/egl_vendor.d}"
+      export MUJOCO_GL="${MUJOCO_GL:-egl}"
+      export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
       PYTHONPATH="${LIBERO_HOME}:${PROJ_ROOT}:${PYTHONPATH:-}" \
       python evaluation/LIBERO-plus/eval_libero_plus.py \
         --host "${HOST}" \

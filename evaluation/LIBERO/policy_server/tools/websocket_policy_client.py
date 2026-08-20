@@ -35,20 +35,24 @@ class WebsocketClientPolicy:
 
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
+                # InternVLA-A1.5 first infer (CUDA warmup + flow matching) can take
+                # well over the websockets default 20s ping timeout; the server
+                # handler is sync and cannot answer pings while sampling.
                 connect_attempts = [
                     {
                         "compression": None,
                         "max_size": None,
                         "additional_headers": headers,
                         "open_timeout": 30,
-                        "ping_interval": 20,
-                        "ping_timeout": 20,
+                        "ping_interval": None,
+                        "ping_timeout": None,
                     },
                     {
                         "compression": None,
                         "max_size": None,
                         "additional_headers": headers,
                         "open_timeout": 30,
+                        "ping_interval": None,
                     },
                     {
                         "compression": None,

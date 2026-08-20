@@ -8,6 +8,31 @@ import numpy as np
 from evaluation.LIBERO.policy_server.tools.websocket_policy_client import WebsocketClientPolicy
 
 
+def _patch_torch_load_for_libero_init_states() -> None:
+    """LIBERO init_files are numpy arrays pickled via torch.save.
+
+    PyTorch >= 2.6 defaults ``torch.load(weights_only=True)``, which rejects those
+    pickles. Force ``weights_only=False`` unless the caller set it explicitly.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+    orig = torch.load
+    if getattr(orig, "_internvla_libero_patched", False):
+        return
+
+    def _load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return orig(*args, **kwargs)
+
+    _load._internvla_libero_patched = True  # type: ignore[attr-defined]
+    torch.load = _load
+
+
+_patch_torch_load_for_libero_init_states()
+
+
 def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
     q = np.asarray(quat, dtype=np.float32).reshape(-1).copy()
     if q.shape[0] != 4:
