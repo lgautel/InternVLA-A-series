@@ -1,0 +1,276 @@
+\section{Experiments}
+\subsection{Experimental Setup}
+\paragraph{Simulation Benchmarks.}
+\textbf{LIBERO}~\citep{liu2023libero} is a Franka Emika Panda benchmark for
+lifelong robotic manipulation, covering four suites: Spatial, Object, Goal, and
+Long.
+\textbf{LIBERO-Plus}~\citep{fei2025liberoplus} is a large-scale  benchmark
+that extends LIBERO with systematically perturbed manipulation tasks. It
+evaluates VLA policies under out-of-distribution simulation settings across
+seven perturbation dimensions, providing a stress test for robustness and
+generalization.
+\textbf{RoboTwin2.0}~\citep{chen2025robotwin} is a benchmark for bimanual
+manipulation that supports multi-task evaluation across diverse robot
+embodiments, scenes, and objects. We use the AgileX Piper dual-arm setup and
+test the policy on eight representative unseen settings to evaluate out-of-domain generalization, each task is evaluated for 100 trials. \textbf{Together}, these three benchmarks provide comprehensive evaluation of our method. LIBERO
+enables comparison with recent 4D-supervised VLA methods~\citep{qian2025geopredict, kim2026pri4rlearningworlddynamics} that report results on
+it but do not release code or models. LIBERO-Plus evaluates
+out-of-distribution robustness in single-arm manipulation, while RoboTwin2.0
+further extends the evaluation to bimanual out-of-distribution generalization. Further details about simulation benchmarks are provided in the appendix.\vspace{-1em}
+
+\paragraph{Real-world Evaluation Suite.}
+To evaluate ELAN4D on real-world tasks requiring 
+spatio-temporal understanding, we design three task categories as illustrated in Figure~\ref{fig:realworld_tasks}, 
+each trained with 50 expert trajectories and evaluated over 20 
+trials.
+\textbf{Visual Robustness:} The robot picks a fruit (alternating 
+between an \emph{apple} and an \emph{orange}) and places it into a basket. At test time, the scene is populated with task-irrelevant distractors \emph{unseen} during training, testing robustness to visual distractors.
+\textbf{Spatial Generalization:} The robot stacks paper cups by 
+insertion. We evaluate the policy with the cups located at positions unseen during training, testing its ability to generalize to novel target locations.
+\textbf{Temporal Reasoning:} The robot performs a two-stage 
+assembly: Placing a cylindrical block on a base, then stacking a 
+cap on top. Errors in the first stage propagate to the second, 
+testing the policy's ability to chain precise manipulation without compounding errors.\vspace{-1em}
+
+\paragraph{Baselines.} Our primary baselines are our base VLA backbone, $\pi_0$ and $\pi_{0.5}$, trained without our proposed modules. This comparison directly isolates the contribution of our 4D-aware supervision. We also compare against a range of state-of-the-art VLA approaches, including DreamVLA~\citep{zhangdreamvla}, GuidedVLA~\citep{jia2026guidedvla}, Spatial Forcing~\citep{li2026spatial}, GeoPredict~\citep{qian2025geopredict} and Pri4R~\citep{kim2026pri4rlearningworlddynamics}.\vspace{-1em}
+
+\paragraph{Implementation Details.}
+During fine-tuning, we use the original LIBERO dataset for both LIBERO and
+LIBERO-Plus, which contains approximately 2K expert demonstrations collected in
+simulation, without using the augmented data from LIBERO-Plus. For RoboTwin2.0,
+we collect 100 expert episodes per task under the clean setting. For 4D
+supervision, we track \(K=8\) keypoints for LIBERO and LIBERO-Plus (7 joints, 1 end-effector), \(K=14\) keypoints for RoboTwin2.0 (6+6 joints, 1+1 end-effector) and \(K=7\) for real world tasks. We train all models for 30K steps using AdamW (LR 2.5e-5) on 8 NVIDIA GH200 GPUs, with a total batch size of 64 and
+\(\lambda_{\mathrm{track}} = 0.1\).
+
+\subsection{Main Results}
+
+
+% We summarize the main evaluation results in Tables~\ref{tab:libero_results},
+% \ref{tab:libero_plus_results}, and Figure~\ref{fig:radar_success_rate}. ELAN4D consistently improves the corresponding base VLA policy across standard single-arm manipulation, out-of-distribution generalization, and bimanual settings. This demonstrates the effectiveness of injecting a
+% privileged 4D prior into policy learning: by encouraging 4D-aware internal representations, ELAN4D improves manipulation performance without modifying the inference interface of the base VLA.
+
+
+\paragraph{LIBERO.}
+Table~\ref{tab:libero_results} reports results on the original LIBERO suites. 
+Despite near-saturated performance of recent VLAs on this benchmark, 
+ELAN4D improves both base policies and achieves competitive overall 
+success rate. ELAN4D($\pi_0$) lifts the overall success rate from 
+94.2\% to 95.0\%, with the largest gain on LIBERO-Long ($+6.6$), suggesting that 4D supervision is most useful when temporal consistency matters.
+ELAN4D($\pi_{0.5}$) further reaches 97.0\%, surpassing both the 
+$\pi_{0.5}$ baseline and recent 4D-supervised methods such as Pri4R and 
+GeoPredict. These gains indicate that our control-branch design injects 
+4D predictive supervision into the base VLA effectively.\vspace{-1em}
+
+\paragraph{LIBERO-Plus.}
+Table~\ref{tab:libero_plus_results} evaluates robustness under systematic 
+perturbations. ELAN4D yields substantial gains over base 
+policies, raising overall success from 53.6\% to 67.6\% for $\pi_0$ and from 73.6\% to 78.2\% for $\pi_{0.5}$. The largest improvements appear on perturbations that alter visual or physical scene configurations. ELAN4D($\pi_{0.5}$) gains $+5.2$ under robot init-state and $+9.0$ under background perturbations, leading to the best overall score among all compared methods. This suggests that ELAN4D encourages 4D representations that are less sensitive to visual and configuration shifts.
+
+\begin{table}[H]
+\vspace{-1.5em}
+\centering
+\caption{\textbf{LIBERO-Plus benchmark results.} ELAN4D achieves the best overall performance, consistently improving over its corresponding base models, $\pi_0$ and $\pi_{0.5}$.}
+\label{tab:libero_plus_results}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l ccccccc ccccc}
+\toprule
+\multirow{2}{*}{Method} 
+& \multicolumn{7}{c}{Perturbation Dimensions} 
+& \multicolumn{5}{c}{Task Suites} \\
+\cmidrule(lr){2-8} \cmidrule(lr){9-13}
+& Camera & Robot & Language & Light & Background & Noise & Layout 
+& Spatial & Object & Goal & Long & Overall \\
+\midrule
+OpenVLA~\citep{kim2025openvla}              & 0.8  & 3.5  & 23.0 & 8.1  & 34.8 & 15.2 & 28.5 & 19.4 & 14.0 & 15.1 & 14.3 & 15.6 \\
+OpenVLA-OFT~\cite{kim2025fine}          & 56.4 & 31.9 & \textbf{79.5} & 88.7 & \textbf{93.3} & 75.8 & 74.2 & 84.0 & 66.5 & 63.0 & 66.4 & 69.6 \\
+UniVLA~\citep{bu2025univla}               & 1.8  & 46.2 & 69.6 & 69.0 & 81.0 & 21.2 & 31.9 & 55.5 & 36.7 & 40.7 & 39.9 & 42.9 \\
+WorldVLA~\citep{cen2025worldvla}             & 0.1  & 27.9 & 41.6 & 43.7 & 17.1 & 10.9 & 38.0 & 32.5 & 28.6 & 31.8 & 8.2  & 25.0 \\
+RIPT-VLA~\citep{tan2025RIPT-VLA}             & 55.2 & 31.2 & 77.6 & 88.4 & \underline{91.6} & 73.5 & 74.2 & \underline{85.8} & 64.3 & 58.0 & \underline{67.5} & 68.4 \\
+DreamVLA~\citep{zhangdreamvla}             & \underline{65.0} & 40.8 & 63.5 & 85.7 & 82.6 & \underline{84.9} & 74.0 & 79.7 & 79.0 & 61.7 & 59.8 & 69.9 \\
+AdaMoE~\citep{shen2025adamoe}               & 53.8 & 17.5 & 20.6 & 73.7 & 73.8 & 58.6 & 65.8 & 51.0 & 57.9 & 53.3 & 38.1 & 50.1 \\
+GuidedVLA~\citep{jia2026guidedvla}           & \textbf{73.7} & 51.4 & 62.6 & \textbf{94.6} & 89.0 & \textbf{85.2} & 79.9 & 84.0 & 80.9 & \underline{70.8} & 66.2 & \underline{75.4} \\
+Spatial Forcing~\citep{li2026spatial}      & 20.1 & 13.4 & 40.9 & 29.1 & 33.4 & 25.7 & 39.3 & 52.9 & 31.0 & 28.2 & 5.4  & 29.1 \\
+VLA-Adapter~\citep{wang2025vlaadapter}          & 36.2 & 37.9 & 74.6 & 70.6 & 76.1 & 58.0 & 69.7 & 85.0 & 46.3 & 56.0 & 50.4 & 59.1 \\
+\midrule
+$\pi_0$~\citep{black2410pi0}              & 13.8 & 6.0  & 58.8 & 85.0 & 81.4 & 79.0 & 68.8 & 60.7 & 61.4 & 44.9 & 48.4 & 53.6 \\
+$\pi_{0.5}$~\citep{black2025pi}          & 59.7 & \underline{65.5} & 75.3 & 87.0 & 82.4 & 72.1 & \underline{80.3} & 79.9 & \textbf{87.8} & 69.0 & 64.9 & 73.6 \\
+ELAN4D($\pi_0$)     & 61.8 & 38.4 & 60.6 & 89.1 & 84.1 & 77.8 & 72.1 & 78.8 & 74.0 & 62.6 & 55.9 & 67.6 \\
+ELAN4D($\pi_{0.5}$) & 63.7 & \textbf{70.7} & \underline{77.8} & \underline{89.8} & 91.4 & 79.9 & \textbf{81.4} & \textbf{86.8} & \underline{84.5} & \textbf{71.5} & \textbf{70.3} & \textbf{78.2} \\
+\bottomrule
+\end{tabular}%
+}
+%\vspace{-2em}
+\end{table}
+
+\begin{minipage}[t]{0.58\columnwidth}
+    \vspace{0pt}
+    \centering
+
+    \captionof{table}{\textbf{LIBERO benchmark results.} ELAN4D achieves the best overall performance, competitive with SOTA models using 4D supervision.}
+    \label{tab:libero_results}
+
+    % \vspace{0.4em}
+
+    \begin{minipage}[t][3.2cm][t]{\linewidth}
+        \centering
+        \scriptsize
+        \setlength{\tabcolsep}{2.5pt}
+        \resizebox{\linewidth}{!}{%
+        \begin{tabular}{lccccc}
+        \toprule
+        Model & Spatial & Object & Goal & Long & Overall \\
+        \midrule
+        $\pi_0$~\citep{black2410pi0}           & 96.8 & \underline{98.8} & 95.8 & 85.2 & 94.2 \\
+        $\pi_{0.5}$~\citep{black2025pi}        & \textbf{98.8} & 98.2 & \underline{98.0} & 92.4 & \underline{96.9} \\
+        Pri4R~\citep{kim2026pri4rlearningworlddynamics} & 93.2 & 98.6 & \textbf{98.1} & \textbf{95.3} & 96.3 \\
+        GeoPredict~\citep{qian2025geopredict}  & 98.0 & 98.2 & 95.7 & 94.0 & 96.6 \\
+        ELAN4D($\pi_0$)                  & 96.4 & 98.2 & 93.4 & 91.8 & 95.0 \\
+        ELAN4D($\pi_{0.5}$)              & \underline{98.2} & \textbf{98.8} & 96.8 & \underline{94.2} & \textbf{97.0} \\
+        \bottomrule
+        \end{tabular}%
+        }
+        \vfill
+    \end{minipage}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.38\columnwidth}
+    \vspace{0pt}
+    \centering
+
+    \begin{minipage}[t][3.2cm][t]{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth,height=3.2cm,keepaspectratio]{sections/figures/radar_success_rate.pdf}
+        \vfill
+    \end{minipage}
+
+    \vspace{0.4em}
+
+    \captionof{figure}{\textbf{RoboTwin2.0 benchmark results.} ELAN4D consistently improves over its base models.}
+    \label{fig:radar_success_rate}
+\end{minipage}
+
+\paragraph{RoboTwin2.0.}Figure~\ref{fig:radar_success_rate} further evaluates ELAN4D's robustness under unseen bimanual settings.
+ELAN4D improves the overall success rate of \(\pi_0\) from \(12\%\) to
+\(15\%\), and improves \(\pi_{0.5}\) from \(32\%\) to \(37\%\). The gains are
+especially clear on tasks requiring spatial understanding, such as
+\textit{Adjust Bottle}, \textit{Dump Bin}, and \textit{Lift Pot}. For
+ELAN4D(\(\pi_{0.5}\)), success on \textit{Dump Bin} increases from \(37\%\) to
+\(49\%\), and \textit{Lift Pot} improves from \(5\%\) to \(15\%\). These results suggest that ELAN4D remains effective in more challenging
+bimanual settings. Success rates corresponding to Figure~\ref{fig:radar_success_rate} are presented in Appendix.
+\vspace{-1em}
+
+% Overall, ELAN4D is effective across all three evaluation settings, improving
+% standard single-arm manipulation, out-of-distribution generalization, and bimanual
+% settings. The gains are especially pronounced on the more challenging
+% LIBERO-Plus and RoboTwin2.0 benchmarks, suggesting that our ControlNet-style
+% fine-tuning with embodied-centric 4D supervision is particularly useful when
+% policies must handle distribution shifts.
+
+\subsection{Real-World Experiments}
+
+\begin{figure}[H]
+    \vspace{-2em}
+    \centering
+    % ---- (a) Real-world tasks ----
+    \begin{subfigure}[b]{0.68\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{sections/figures/real_tasks.pdf}
+        \caption{Illustration of Real-world task settings.}
+        \label{fig:realworld_tasks}
+    \end{subfigure}
+    \hfill
+    % ---- (b) Success rates ----
+    \begin{subfigure}[b]{0.29\linewidth}
+        \centering
+        \small
+        \setlength{\tabcolsep}{4pt}
+        \includegraphics[width=\linewidth]{sections/figures/realworld_success_bar.pdf}
+        \caption{Task success rates (\%).}
+        \label{fig:realworld_table}
+    \end{subfigure}
+    \vspace{-0.5em}
+    \caption{\textbf{Real-world evaluation.}
+    \textbf{(a)} Three real-world task settings testing visual robustness, spatial generalization, and temporal reasoning.
+    \textbf{(b)} Success rates (\%) on the three real-world tasks. ELAN4D consistently improves $\pi_{0.5}$ across all three tasks.}
+    \label{fig:realworld_results}
+    \vspace{-2em}
+\end{figure}
+
+We evaluate ELAN4D on an AgileX Piper arm across three real-world task categories: visual robustness, spatial generalization, and temporal reasoning. As shown in Figure~\ref{fig:realworld_results}, ELAN4D consistently outperforms the $\pi_{0.5}$ baseline across all three tasks. On Robustness and Spatial tasks, ELAN4D improves success from 50\% to 80\% and from 15\% to 65\%, respectively, demonstrating stronger robustness to unseen distractors and better spatial generalization. On temporal task, ELAN4D raises success from 5\% to 45\%, suggesting that embodiment-centric 4D supervision helps reduce error accumulation in long-horizon manipulation. More illustrations are provided in the appendix.\vspace{-1em}
+
+\subsection{Ablation Study and Analysis}
+\vspace{-1em}
+\begin{figure}[t]
+\centering
+% ---- (a) 表 ----
+\begin{subfigure}[b]{0.42\textwidth}
+    \centering
+    \small
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{lcc}
+    \toprule
+    Variant & SR & $\Delta$ \\
+    \midrule
+    Base VLA $\pi_{0.5}$                 & 73.6 & -- \\
+    + Control branch (no 4D)             & 73.3 & {\color{softred}-0.3} \\
+    \midrule
+    \multicolumn{3}{l}{\textit{Where to predict 4D}} \\
+    \quad VLM + track queries            & 66.8 & {\color{softred}-6.8} \\
+    \quad Control branch (ours)          & 78.2 & {\color{softgreen}+4.6} \\
+    \midrule
+    \multicolumn{3}{l}{\textit{What to predict}} \\
+    \quad Whole-scene Track              & 79.3 & {\color{softgreen}+5.7} \\
+    \quad Robot Keypoints (ours)         & 78.2 & {\color{softgreen}+4.6} \\
+    \bottomrule
+    \end{tabular}
+    \caption{Ablation on LIBERO-Plus.}
+    \label{tab:ablation}
+\end{subfigure}
+\hfill
+% ---- (b) CKA ----
+\begin{subfigure}[b]{0.28\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{sections/figures/cka_beautified_v2_square.pdf}
+    \caption{CKA similarity analysis.}
+    \label{fig:cka}
+\end{subfigure}
+\hfill
+% ---- (c) Data Scaling ----
+\begin{subfigure}[b]{0.28\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{sections/figures/data_scaling.pdf}
+    \caption{Data scaling on LIBERO.}
+    \label{fig:data_scaling}
+\end{subfigure}
+\caption{\textbf{Analysis on LIBERO-Plus and LIBERO.}
+\textbf{(a)} Ablation on key design choices on LIBERO-Plus. 
+Gains come from 4D supervision rather than added parameters. Attaching 4D prediction to the control branch outperforms attaching it to VLM via track queries. Robot keypoint tracks perform comparably to whole-scene tracks with lower preprocessing cost.
+\textbf{(b)} Layer-wise linear CKA between VLM of LIBERO-finetuned $\pi_{0.5}$ and two 4D supervised variants. Predicting 4D inside the VLM (query tokens) causes large representational drift, while our control branch keeps the VLM features close to the baseline. \textbf{(c)} Data efficiency on LIBERO: ELAN4D consistently 
+outperforms the baseline $\pi_{0.5}$ across all data ratios.}
+\label{fig:analysis}
+\vspace{-1.5em}
+\end{figure}
+
+\paragraph{Effect of 4D supervision.}
+To isolate the contribution of 4D supervision from the added parameters of 
+the control branch, we train a variant that retains the full control-branch 
+architecture but removes the track prediction loss. As shown in 
+Table~\ref{tab:ablation}, this variant scores 73.3\% on LIBERO-Plus, matching the base VLA $\pi_{0.5}$ (73.6\%) and far below our method (78.2\%). The gain of ELAN4D therefore comes from the embodiment-centric 4D supervision itself, not from extra capacity.\vspace{-1em}
+
+\paragraph{Ablation on VLM-predicted 4D.}
+We compare against an alternative that lets the VLM itself predict future 4D dynamics, by encoding current robot keypoints into 3D tokens and appending learnable track-query tokens to the VLM input (details are in the appendix). As shown in Table~\ref{tab:ablation}, this variant drops to 66.8\% 
+($-6.8$), substantially underperforming our control-branch design (78.2\%) on tasks requiring strong generalization. We attribute this to the auxiliary query tokens and trajectory objective disrupting the VLM's pretrained representations. The Centered Kernel Alignment (CKA) analysis in Figure~\ref{fig:cka} corroborates this: relative to the 
+finetuned $\pi_{0.5}$ VLM, the query-token variant shows markedly lower similarity than ours, indicating larger representational drift. Our design avoids this by isolating 4D prediction in the control branch, leaving the VLM backbone intact.\vspace{-1em}
+
+\paragraph{Are whole-scene keypoints necessary?}
+We additionally consider supervising both robot and 
+objects-of-interest keypoint tracks. Since static background carries no motion, this effectively covers all 4D signal in the scene. To probe the upper bound of this design, we obtain object keypoints from simulator ground-truth, avoiding any bias from off-the-shelf trackers. Even with such privileged supervision, whole-scene keypoints yield only a marginal gain over our robot-only design (1.1\%, Table~\ref{tab:ablation}). While richer scene-level signals can in principle help, this result suggests that for most scenarios, a cheap embodiment-centric 4D surrogate already absorbs most of the benefit, without requiring expensive trackers. The cost gap is striking in practice: extracting whole-scene keypoints tracks from 1 hour of 
+video via a SAM~\citep{sam} + spatial-tracker~\citep{xiao2025spatialtracker} 
+pipeline takes $\sim$4 GPU-hours, whereas robot keypoints tracks can be obtained from proprioception in under 1 CPU-minute. We therefore adopt robot keypoints as our default.\vspace{-1em}
+
+\paragraph{Performance on Data Scaling.} 
+We uniformly sample 20\%, 40\%, 60\% and 80\% of the LIBERO data, train both $\pi_{0.5}$ and ELAN4D and evaluate on LIBERO (Figure~\ref{fig:data_scaling}). 
+ELAN4D outperforms $\pi_{0.5}$ at every budget, and the gap widens as 
+data shrinks: with only 20\% of the data it reaches 75.0\%, 
+~10\% above $\pi_{0.5}$ and compatible with $\pi_{0.5}$ trained on 
+1.5 times as much data. This highlights the data efficiency of ELAN4D.\vspace{-1em}

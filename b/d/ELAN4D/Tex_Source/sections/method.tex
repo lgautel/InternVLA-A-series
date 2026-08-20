@@ -1,0 +1,77 @@
+\section{Method}\vspace{-1em}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{sections/figures/Model_Architecture.pdf}
+    \caption{\textbf{Overview of ELAN4D.}
+    \textbf{Left:} Image and instruction tokens are encoded by a pretrained VLM backbone and, together with noised action tokens, fed into an \emph{Action Expert} whose layers are augmented with \emph{Control Layers}. An \emph{Action Decoder} predicts future actions, while a \emph{Track Decoder} predicts future robot 3D keypoint trajectories as 4D supervision.
+    \textbf{Mid:} Zoom-in of a Control Layer. A residual control branch (purple) applies attention followed by a \emph{zero-initialized linear} layer, and adds its output to the main action pathway (blue) via $\oplus$. \textbf{Right:}  Zoom-in of Track Decoder. At the final control layer, the control branch features, conditioned on the current 3D keypoint positions, feed the Track Decoder. At inference, the 3D input and Track Decoder are discarded.} 
+    \label{fig:Model_Architecture}
+    \vspace{-1em}
+\end{figure}
+
+We propose ELAN4D, a training framework that improves VLA policies with embodiment-centric 4D supervision. The central design is to expose the action module to 4D dynamics during training through a plug-and-play residual branch, while keeping track-loss gradients away from the pretrained vision-language pathway and preserving policy interface. ELAN4D consists of two components: a 4D supervision signal derived from proprioceptive trajectories, and a ControlNet-style branch that absorbs this auxiliary supervision through a residual pathway~\citep{zhang2023controlnet, li2025controlvla}. We first review the VLA setup (Sec.~\ref{sec:prelim}), then describe the 4D supervision signal (Sec.~\ref{sec:4d_signal}), introduce the control branch and track decoder (Sec.~\ref{sec:control_branch}), and finally present training and inference (Sec.~\ref{sec:training}).
+
+\subsection{Preliminary}
+\label{sec:prelim}
+\paragraph{Problem Formulation.} We consider language-conditioned manipulation under the Vision-Language-Action (VLA) paradigm~\citep{kim2025openvla,black2410pi0}. At each step $t$, the policy takes a language instruction $\mathbf{L}$, multi-view images $\mathbf{I}_t$, and proprioceptive state $\mathbf{q}_t$ as input, and predicts an action chunk $\mathbf{A}_t = [\mathbf{a}_t, \dots, \mathbf{a}_{t+H-1}]$ of horizon $H$. Each $\mathbf{a}_t \in \mathbb{R}^7$ denoting a 7-DoF end-effector command $\mathbf{a}_t = [\Delta \mathbf{x}_t, \Delta \boldsymbol{\theta}_t, g_t]$, where $\Delta \mathbf{x}_t \in \mathbb{R}^3$ and $\Delta \boldsymbol{\theta}_t \in \mathbb{R}^3$ are the translational and rotational offsets, and $g_t \in \mathbb{R}$ is the gripper's open-close state.\vspace{-1em}
+\paragraph{Base Models.} We build on the OpenPI series ($\pi_0$~\citep{black2410pi0} and $\pi_{0.5}$~\citep{black2025pi}), which combine a PaliGemma~\citep{beyer2024paligemma} VLM backbone with an action expert that predicts continuous action chunks via conditional flow matching. Our goal is to enhance action learning with auxiliary 4D supervision during training, without altering the policy interface at inference.
+
+\subsection{Embodiment-centric 4D Supervision}
+\label{sec:4d_signal}
+As illustrated in Figure~\ref{fig:Model_Architecture}, ELAN4D uses future robot keypoint tracks as an auxiliary supervision signal. Specifically, we represent the robot body with a sparse set of 3D keypoints placed on the arm joints and end-effector, and supervise their displacements over the action horizon. This provides embodiment-centric 4D supervision that is naturally aligned with action generation.\vspace{-1em}
+
+\paragraph{Track construction.}
+For each demonstration trajectory, we access the proprioceptive state \(\mathbf{q}_t\) at every control step. Let \(\mathcal{K}=\{1,\dots,K\}\) denote the selected robot keypoints, including the major arm joints and the end-effector. Using the known robot kinematic chain~\citep{craig2009introduction}, forward kinematics maps each keypoint \(k\) to its Cartesian position \(\mathbf{p}_{t}^{k}\in\mathbb{R}^{3}\) in the robot base frame: \(\mathbf{p}_{t}^{k} = \mathrm{FK}_{k}(\mathbf{q}_{t})\). Let \(\mathbf{P}_{\tau}=[\mathbf{p}_{\tau}^{1}, \dots, \mathbf{p}_{\tau}^{K}] \in \mathbb{R}^{K\times 3}\) denote the full keypoint set at time \(\tau\). This signal is occlusion-free and much cheaper to obtain than video-based trackers such as SpatialTracker~\citep{xiao2025spatialtracker} (\(\sim\!1\) CPU-minute vs.\ \(>\!4\) GPU-hours per hour of data).\vspace{-1em}
+
+\paragraph{Future displacement target.}
+At time \(t\), we define the 4D supervision target as the future displacement track of robot keypoints over the action horizon. Specifically, each future keypoint set is expressed relative to the current geometry as \(\Delta \mathbf{P}_{t+h} = \mathbf{P}_{t+h} - \mathbf{P}_{t}\), for \(h=1,\dots,H\). We collect these relative displacements into
+\begin{equation}
+    \mathbf{Y}_{t}
+    =
+    \left[
+    \Delta \mathbf{P}_{t+1}, \Delta \mathbf{P}_{t+2}, \dots, \Delta \mathbf{P}_{t+H}
+    \right]
+    \in \mathbb{R}^{H\times K\times 3}.
+    \label{eq:track-target}
+\end{equation}
+This target specifies the robot's 3D motion over time and serves as training-time 4D supervision. While whole-scene dynamics may contain richer signals, robot keypoint tracks offer a cheaper and focused supervision signal over manipulation-relevant motion.
+
+\subsection{ControlNet-Style Action Branch}
+\label{sec:control_branch}
+
+We next describe how embodiment-centric 4D supervision is introduced into the policy. As coupling the 4D prediction task too tightly to the VLM may disturb pretrained visual-language representations, ELAN4D attaches a trainable residual branch to the action expert, thereby confining the auxiliary supervision to the main action generation pathway.\vspace{-1em}
+
+\paragraph{Residual control branch.}
+Let \(\mathbf{u}_{t}\) denote the action-expert feature produced by the policy from the language, image, and proprioceptive inputs. ELAN4D adds a ControlNet-style branch and fuses it with the main action feature through a projection initialized to zero:
+\begin{equation}
+\widetilde{\mathbf{u}}_{t} = \mathbf{u}_{t} + \mathrm{Proj}(\mathbf{C}_{t}), \qquad \mathbf{C}_{t} = b_{\psi}(\mathrm{sg}(\mathbf{u}_{t})).
+\end{equation}
+Here \(b_{\psi}\) is the trainable control branch, \(\mathbf{C}_{t}\) denotes its output token features, and \(\mathrm{sg}(\cdot)\) denotes stop-gradient. The stop-gradient operation
+prevents the auxiliary 4D objective from propagating into the pretrained vision-language representation. The projection \(\mathrm{Proj}(\cdot)\) is initialized to zero before fusion,
+so the control branch initially contributes no residual signal, preserving the pretrained action behavior and stabilizing early post-training.\vspace{-1em}
+
+\paragraph{Track decoder.}
+To anchor the auxiliary prediction to the current robot state, we augment the control branch with a lightweight point-conditioned track decoder that predicts future 4D displacements for robot keypoints. At time \(t\), a point MLP embeds the current robot keypoints \(\mathbf{P}_t \in \mathbb{R}^{K \times 3}\) into per-keypoint features, while a control MLP maps the control-branch features \(\mathbf{C}_t \in \mathbb{R}^{H \times d}\) into per-step control features. We broadcast the control features across keypoints and the keypoint features across the horizon, concatenate them to form a tensor in \(\mathbb{R}^{H \times K \times (d + d_p)}\), and feed the result to a fusion MLP with residual blocks to predict per-step 3D displacements:
+\begin{equation}
+\widehat{\mathbf{Y}}_t = \mathrm{MLP}_{\mathrm{fusion}} \!\left( \mathrm{MLP}_{\mathrm{ctrl}}(\mathbf{C}_t) \oplus \mathrm{MLP}_{\mathrm{point}}(\mathbf{P}_t) \right) \in \mathbb{R}^{H \times K \times 3}.
+\end{equation}
+By conditioning displacement prediction on both current keypoints and horizon-wise control features, track decoder supervises \(\mathbf{C}_t\) to capture future robot keypoint motion. %It is used only during training and is discarded at inference, leaving the original VLA interface unchanged: ELAN4D takes the same inputs as the base policy and outputs only the action chunk.
+
+\subsection{Training and Inference}
+\label{sec:training}
+We train ELAN4D by jointly optimizing the original action objective \(\mathcal{L}_{\mathrm{act}}\), instantiated as conditional flow matching for the \(\pi\)-series base models, and an
+auxiliary 4D prediction objective.\vspace{-1em}
+
+\paragraph{Track prediction loss.}
+The track loss supervises predicted robot keypoint displacements over all future steps and selected keypoints. Let \(\widehat{\Delta\mathbf{p}}_{t+h}^{k}\) and \(\Delta\mathbf{p}_{t+h}^{k}\) denote the \(k\)-th predicted and target displacements in \(\widehat{\mathbf{Y}}_t\) and \(\mathbf{Y}_t\), respectively:
+\begin{equation}
+    \mathcal{L}_{\mathrm{track}} = \frac{1}{HK} \sum_{h=1}^{H}\sum_{k=1}^{K} \left\| \widehat{\Delta\mathbf{p}}_{t+h}^{k} - \Delta\mathbf{p}_{t+h}^{k} \right\|_{1}.
+\end{equation}
+We use an \(\ell_1\) distance by default for robustness to occasional noisy state estimates. By supervising every selected keypoint at every future step, this loss encourages the branch to learn predictive and dynamically consistent 4D features.\vspace{-1em}
+
+\paragraph{Training objective.}
+We optimize the combined objective \(\mathcal{L} = \mathcal{L}_{\mathrm{act}} + \lambda_{\mathrm{track}} \mathcal{L}_{\mathrm{track}}\), where \(\lambda_{\mathrm{track}}\) balances imitation learning and 4D prediction. The two losses are applied to different parameter subsets. \(\mathcal{L}_{\mathrm{act}}\) supervises the main action-generation pathway and the added control branch, while \(\mathcal{L}_{\mathrm{track}}\) updates only the control branch and the track decoder. A stop-gradient operation at the branch input prevents \(\mathcal{L}_{\mathrm{track}}\) from propagating into the pretrained VLM backbone and the original action branch. Thus, the track loss serves as an auxiliary training signal without directly modifying the pretrained visual-language representation.\vspace{-1em}
+
+\paragraph{Inference.}
+At inference time, ELAN4D discards the track decoder and does not require future robot keypoint tracks as inputs or outputs. The policy consumes the same language, image, and proprioceptive inputs as the base VLA and predicts the same action chunk, with only the learned residual control branch retained in the action expert.\vspace{-1em}

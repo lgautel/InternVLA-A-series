@@ -4,7 +4,7 @@
 ################################# ENV config ##################################
 
 CONDA_ROOT=${_CONDA_ROOT}
-CONDA_ENV=internvla_a1_5
+CONDA_ENV=${CONDA_ENV:-itvlaGp}
 
 source ${CONDA_ROOT}/etc/profile.d/conda.sh
 conda activate ${CONDA_ENV}
@@ -43,6 +43,7 @@ python ../../evaluation/RoboTwin/inference.py \
   --video-dir "${OUTPUT_PATH}" \
   --task-config "${TASK_CONFIG}" \
   --task-idx "${TASK_IDX}" \
+  --resize-size "${RESIZE_SIZE}" \
   --action-mode "${ACTION_MODE}" \
   --infer-horizon "${INFER_HORIZON}" \
   --inference-backend "${INFERENCE_BACKEND}" \

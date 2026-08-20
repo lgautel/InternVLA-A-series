@@ -187,3 +187,5 @@ open_loop_results/
 third_party/
 export_internvla_a15_checkpoint.py
 ckpt/
+ckpts/
+outputs-ext

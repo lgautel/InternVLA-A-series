@@ -155,6 +155,13 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = true
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+
 [tool.typos]
 default.extend-ignore-re = [
     "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",

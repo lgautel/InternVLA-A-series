@@ -42,6 +42,41 @@ from lerobot.transforms.core import (
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 
+ALOHA_KEYPOINT_LINKS = [
+    "fl_link1", "fl_link2", "fl_link3", "fl_link4", "fl_link5", "fl_link6", "left_camera",
+    "fr_link1", "fr_link2", "fr_link3", "fr_link4", "fr_link5", "fr_link6", "right_camera",
+]
+
+
+def get_keypoints_aloha(robot_entity, footprint_pose=None):
+    """Extract 14 keypoint 3D positions (footprint-relative) from SAPIEN aloha robot.
+
+    Args:
+        robot_entity: SAPIEN ArticulationBase for the aloha robot.
+        footprint_pose: sapien.Pose of footprint link. Cached externally (fixed base).
+    Returns:
+        keypoints: np.ndarray [14, 3], footprint-relative coordinates.
+        footprint_pose: the footprint pose (for caching on first call).
+    """
+    if footprint_pose is None:
+        fp_link = robot_entity.find_link_by_name("footprint")
+        footprint_pose = fp_link.get_pose()
+
+    fp_pos = np.asarray(footprint_pose.p, dtype=np.float64)
+    q = footprint_pose.q
+    from scipy.spatial.transform import Rotation
+
+    fp_rot_inv = Rotation.from_quat([q[1], q[2], q[3], q[0]]).inv().as_matrix()
+
+    keypoints = np.zeros((14, 3), dtype=np.float32)
+    for i, link_name in enumerate(ALOHA_KEYPOINT_LINKS):
+        link = robot_entity.find_link_by_name(link_name)
+        world_pos = np.asarray(link.get_pose().p, dtype=np.float64)
+        keypoints[i] = (fp_rot_inv @ (world_pos - fp_pos)).astype(np.float32)
+
+    return keypoints, footprint_pose
+
+
 TASK_NAMES = [
     "adjust_bottle",
     "beat_block_hammer",
@@ -352,6 +387,9 @@ def infer_once(args: argparse.Namespace):
         try:
             task_env.setup_demo(now_ep_num=episode_id, seed=seed_value, is_test=True, **task_args)
             episode_info = task_env.play_once()
+            # check_success() requires self.robot, which close_env() sets to None,
+            # so the expert result must be captured before closing the env.
+            expert_success = bool(task_env.plan_success and task_env.check_success())
             maybe_close_env(task_env)
         except unstable_error as exc:
             logging.warning("Skipping unstable seed for task=%s seed=%s: %s", task_name, seed_value, exc)
@@ -367,12 +405,11 @@ def infer_once(args: argparse.Namespace):
             task_args["render_freq"] = render_freq
             continue
 
-        if task_env.plan_success and task_env.check_success():
-            successful_seed_count += 1
-        else:
+        if not expert_success:
             seed_cursor += 1
             task_args["render_freq"] = render_freq
             continue
+        successful_seed_count += 1
 
         task_args["render_freq"] = render_freq
         task_env.setup_demo(now_ep_num=episode_id, seed=seed_value, is_test=True, **task_args)
@@ -386,6 +423,14 @@ def infer_once(args: argparse.Namespace):
         replay_images: list[np.ndarray] = []
         success = False
 
+        use_kpt = getattr(config, "enable_keypoint_predictor", False)
+        if use_kpt:
+            J = getattr(config, "num_keypoint_joints", 14)
+            H = getattr(config, "keypoint_history_max_len", 1000)
+            his_kpts = np.zeros((H, J, 3), dtype=np.float32)
+            his_len = 0
+            footprint_pose = None
+
         while task_env.take_action_cnt < task_env.step_lim:
             observation = task_env.get_obs()
             sample = build_sample(observation, task_env.get_instruction(), dtype)
@@ -394,8 +439,23 @@ def infer_once(args: argparse.Namespace):
             transformed_image = sample[f"{OBS_IMAGES}.image0"]
             replay_images.append(tensor_chw_to_uint8_hwc(transformed_image))
 
+            if use_kpt:
+                robot_entity = task_env.robot.left_entity
+                kpt_t, footprint_pose = get_keypoints_aloha(robot_entity, footprint_pose)
+                if his_len < H:
+                    his_kpts[his_len] = kpt_t
+                else:
+                    his_kpts = np.roll(his_kpts, -1, axis=0)
+                    his_kpts[-1] = kpt_t
+                his_len = min(his_len + 1, H)
+
             if not action_plan:
                 batch = to_policy_batch(sample, device, dtype)
+
+                if use_kpt:
+                    batch["observation.his_kpts"] = torch.from_numpy(his_kpts).unsqueeze(0).to(device=device, dtype=dtype)
+                    batch["observation.his_len"] = torch.tensor([his_len], dtype=torch.long, device=device)
+
                 with torch.no_grad():
                     action_pred = policy.predict_action_chunk(batch)
 

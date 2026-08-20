@@ -103,9 +103,14 @@ class WanVideoModel(nn.Module):
             config_path = checkpoint_path
 
         config_json_path = os.path.join(config_path, 'config.json')
-        if os.path.exists(config_json_path):
-            with open(config_json_path, 'r') as f:
-                model_config = json.load(f)
+        if not os.path.exists(config_json_path):
+            raise FileNotFoundError(
+                f"WAN config.json not found at {config_json_path}. Point "
+                "`wan_checkpoint_path`/`wan_config_path`/`vae_path` at a local Wan2.2-TI2V-5B "
+                "copy, or set `action_loss_only=True` to train without the video branch."
+            )
+        with open(config_json_path, 'r') as f:
+            model_config = json.load(f)
 
         model = cls(
             model_config=model_config,

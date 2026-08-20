@@ -167,9 +167,13 @@ echo "==== [${TASK_SUITE} ${START_IDX}-${END_IDX}] starting ===="
   cd "${PROJ_ROOT}"
   export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_DIR}"
   # ImageMagick (wand dependency) is in the libero_plus conda env; ensure its
-  # shared lib is on the loader path.
+  # shared lib is on the loader path. NVIDIA EGL must come first so MuJoCo
+  # gets PLATFORM_DEVICE instead of mesa's libEGL.
   export MAGICK_HOME="${CONDA_PREFIX}"
-  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+  export __EGL_VENDOR_LIBRARY_DIRS="${__EGL_VENDOR_LIBRARY_DIRS:-${HOME}/.local/share/glvnd/egl_vendor.d}"
+  export MUJOCO_GL="${MUJOCO_GL:-egl}"
+  export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
   PYTHONPATH="${LIBERO_HOME}:${PROJ_ROOT}:${PYTHONPATH:-}" \
   python evaluation/LIBERO-plus/eval_libero_plus.py \
     --host "${HOST}" \

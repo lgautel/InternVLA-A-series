@@ -38,6 +38,11 @@ from transformers.models.qwen3_5 import (
 
 from lerobot.policies.internvla_a1_5.action_tokens import ensure_qwen35_action_tokens
 from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import InternVLAA15Config
+from lerobot.policies.internvla_a1_5.keypoints import (
+    TrackEncoder,
+    get_1d_sincos_pos_embed,
+    load_geopredict_track_encoder_weights,
+)
 from lerobot.policies.internvla_a1_5.wan_model import WanVideoModel
 from lerobot.policies.internvla_a1_5.wan.modules.model import sinusoidal_embedding_1d
 from lerobot.policies.internvla_a1_5.wan.utils.fm import FlowMatchScheduler
@@ -335,6 +340,219 @@ def compute_layer_complete(
         raise ValueError(f"Unknown layer_type: {layer_type}")
 
 
+def compute_layer_complete_3path(
+    layer_idx,
+    inputs_embeds,
+    attention_mask,
+    position_ids,
+    qwen3_5,
+    keypoint_expert,
+    action_expert,
+    prefix_len: int,
+    kpt_len: int,
+    knowledge_insulation: bool = False,
+    knowledge_insulation_kpt: bool = False,
+    kpt_to_action_detach: bool = False,
+    use_sdpa: bool = False,
+    linear_attn_mask: torch.Tensor | None = None,
+):
+    """Run one transformer layer jointly on [VLM prefix, keypoint expert suffix, action expert
+    suffix] (GeoPredict 3D keypoint fusion "three-path MoT", see
+    ``b/d/itrnVLA15_GeoP_3dtrj_3cn2.md`` §8).
+
+    This mirrors :func:`compute_layer_complete` (the 2-path VLM+action implementation) but with
+    an additional keypoint-expert path inserted between the prefix and the action suffix:
+
+        - ``knowledge_insulation``: detaches prefix K/V when the *action* expert attends to it
+          (same semantics as the 2-path function).
+        - ``knowledge_insulation_kpt``: detaches prefix K/V when the *keypoint* expert attends
+          to it.
+        - ``kpt_to_action_detach``: detaches the keypoint expert's K/V when the *action* expert
+          attends to it (independent of ``knowledge_insulation``).
+
+    Attention rules (see design doc §7/§3.3): prefix only attends to itself; the keypoint expert
+    attends to [prefix, keypoint]; the action expert attends to [prefix, keypoint, action]. This
+    is enforced both by the block-causal ``attention_mask`` slices below and by construction
+    (queries from an earlier path are never combined with keys from a later path).
+    """
+
+    models = [qwen3_5.language_model, keypoint_expert, action_expert]
+    layer_type = qwen3_5.language_model.layers[layer_idx].layer_type
+
+    if layer_type == "linear_attention":
+        if linear_attn_mask is not None:
+            prefix_linear_mask = linear_attn_mask[:, :prefix_len]
+            kpt_linear_mask = linear_attn_mask[:, prefix_len : prefix_len + kpt_len]
+            action_linear_mask = linear_attn_mask[:, prefix_len + kpt_len :]
+            linear_masks_per_model = [prefix_linear_mask, kpt_linear_mask, action_linear_mask]
+        else:
+            linear_masks_per_model = [None, None, None]
+
+        outputs_embeds = []
+        for i, hidden_states in enumerate(inputs_embeds):
+            layer = models[i].layers[layer_idx]
+
+            residual = hidden_states
+            hidden_states = layer.input_layernorm(hidden_states)
+            hidden_states = layer.linear_attn(
+                hidden_states=hidden_states,
+                cache_params=None,
+                cache_position=None,
+                attention_mask=linear_masks_per_model[i],
+            )
+            hidden_states = residual + hidden_states
+
+            after_first_residual = hidden_states
+            hidden_states = layer.post_attention_layernorm(hidden_states)
+
+            if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+                hidden_states = hidden_states.to(dtype=torch.bfloat16)
+            hidden_states = layer.mlp(hidden_states)
+
+            hidden_states = hidden_states + after_first_residual
+            outputs_embeds.append(hidden_states)
+
+        return outputs_embeds
+
+    elif layer_type == "full_attention":
+        query_states = []
+        key_states = []
+        value_states = []
+        gates = []
+        for i, hidden_states in enumerate(inputs_embeds):
+            layer = models[i].layers[layer_idx]
+            hidden_states = layer.input_layernorm(hidden_states)
+            input_shape = hidden_states.shape[:-1]
+
+            q_gate = layer.self_attn.q_proj(hidden_states).view(
+                *input_shape, -1, layer.self_attn.head_dim * 2
+            )
+            query_state, gate = torch.chunk(q_gate, 2, dim=-1)
+            gate = gate.reshape(*input_shape, -1)
+
+            hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+            query_state = layer.self_attn.q_norm(query_state.view(hidden_shape)).transpose(1, 2)
+            key_state = layer.self_attn.k_norm(
+                layer.self_attn.k_proj(hidden_states).view(hidden_shape)
+            ).transpose(1, 2)
+            value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+            query_states.append(query_state)
+            key_states.append(key_state)
+            value_states.append(value_state)
+            gates.append(gate)
+
+        joint_query = torch.cat(query_states, dim=2)
+        joint_key = torch.cat(key_states, dim=2)
+        joint_value = torch.cat(value_states, dim=2)
+
+        dummy_tensor = torch.zeros(
+            joint_query.shape[0],
+            joint_query.shape[2],
+            joint_query.shape[-1],
+            device=joint_query.device,
+            dtype=joint_query.dtype,
+        )
+        cos, sin = qwen3_5.language_model.rotary_emb(dummy_tensor, position_ids)
+        joint_query, joint_key = modeling_qwen3_5.apply_rotary_pos_emb(
+            joint_query, joint_key, cos, sin, unsqueeze_dim=1
+        )
+
+        # Split back after RoPE. Segment boundaries: [0:prefix_len] [prefix_len:prefix_len+kpt_len] [prefix_len+kpt_len:]
+        kpt_end = prefix_len + kpt_len
+        prefix_query, kpt_query, action_query = (
+            joint_query[:, :, :prefix_len],
+            joint_query[:, :, prefix_len:kpt_end],
+            joint_query[:, :, kpt_end:],
+        )
+        prefix_key, kpt_key, action_key = (
+            joint_key[:, :, :prefix_len],
+            joint_key[:, :, prefix_len:kpt_end],
+            joint_key[:, :, kpt_end:],
+        )
+        prefix_value, kpt_value, action_value = (
+            joint_value[:, :, :prefix_len],
+            joint_value[:, :, prefix_len:kpt_end],
+            joint_value[:, :, kpt_end:],
+        )
+
+        scaling = qwen3_5.language_model.layers[layer_idx].self_attn.scaling
+        attn_layer = qwen3_5.language_model.layers[layer_idx].self_attn
+        batch_size = joint_query.shape[0]
+
+        def _run_attn(q, k, v, mask):
+            if use_sdpa:
+                k_expanded = modeling_qwen3_5.repeat_kv(k, attn_layer.num_key_value_groups)
+                v_expanded = modeling_qwen3_5.repeat_kv(v, attn_layer.num_key_value_groups)
+                out = F.scaled_dot_product_attention(
+                    q, k_expanded, v_expanded, attn_mask=mask.to(q.dtype), scale=scaling,
+                )
+                return out.transpose(1, 2).contiguous()
+            out, _ = modeling_qwen3_5.eager_attention_forward(attn_layer, q, k, v, mask, scaling)
+            return out
+
+        # --- prefix: self-attention only (VLM never sees kpt/action, by construction). ---
+        prefix_attn_mask = attention_mask[:, :, :prefix_len, :prefix_len]
+        prefix_att_output = _run_attn(prefix_query, prefix_key, prefix_value, prefix_attn_mask)
+
+        # --- keypoint expert: attends to [prefix (maybe detached), keypoint]. ---
+        prefix_key_for_kpt = prefix_key.detach() if knowledge_insulation_kpt else prefix_key
+        prefix_value_for_kpt = prefix_value.detach() if knowledge_insulation_kpt else prefix_value
+        k_for_kpt = torch.cat([prefix_key_for_kpt, kpt_key], dim=2)
+        v_for_kpt = torch.cat([prefix_value_for_kpt, kpt_value], dim=2)
+        kpt_attn_mask = attention_mask[:, :, prefix_len:kpt_end, :kpt_end]
+        kpt_att_output = _run_attn(kpt_query, k_for_kpt, v_for_kpt, kpt_attn_mask)
+
+        # --- action expert: attends to [prefix (maybe detached), keypoint (maybe detached), action]. ---
+        prefix_key_for_action = prefix_key.detach() if knowledge_insulation else prefix_key
+        prefix_value_for_action = prefix_value.detach() if knowledge_insulation else prefix_value
+        kpt_key_for_action = kpt_key.detach() if kpt_to_action_detach else kpt_key
+        kpt_value_for_action = kpt_value.detach() if kpt_to_action_detach else kpt_value
+        k_for_action = torch.cat([prefix_key_for_action, kpt_key_for_action, action_key], dim=2)
+        v_for_action = torch.cat([prefix_value_for_action, kpt_value_for_action, action_value], dim=2)
+        action_attn_mask = attention_mask[:, :, kpt_end:, :]
+        action_att_output = _run_attn(action_query, k_for_action, v_for_action, action_attn_mask)
+
+        att_output = torch.cat([prefix_att_output, kpt_att_output, action_att_output], dim=1)
+
+        head_dim = qwen3_5.language_model.layers[layer_idx].self_attn.head_dim
+        num_attention_heads = qwen3_5.language_model.layers[layer_idx].self_attn.config.num_attention_heads
+        att_output = att_output.reshape(batch_size, -1, num_attention_heads * head_dim)
+
+        gates_joint = torch.cat(gates, dim=1)
+
+        outputs_embeds = []
+        start_pos = 0
+        for i, hidden_states in enumerate(inputs_embeds):
+            layer = models[i].layers[layer_idx]
+            end_pos = start_pos + hidden_states.shape[1]
+
+            att_out_slice = att_output[:, start_pos:end_pos]
+            gate_slice = gates_joint[:, start_pos:end_pos]
+
+            att_out_slice = att_out_slice * torch.sigmoid(gate_slice)
+
+            if att_out_slice.dtype != layer.self_attn.o_proj.weight.dtype:
+                att_out_slice = att_out_slice.to(layer.self_attn.o_proj.weight.dtype)
+            out_emb = layer.self_attn.o_proj(att_out_slice)
+
+            out_emb = out_emb + hidden_states
+            after_first_residual = out_emb.clone()
+            out_emb = layer.post_attention_layernorm(out_emb)
+
+            if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+                out_emb = out_emb.to(dtype=torch.bfloat16)
+            out_emb = layer.mlp(out_emb)
+
+            out_emb = out_emb + after_first_residual
+            outputs_embeds.append(out_emb)
+            start_pos = end_pos
+        return outputs_embeds
+
+    else:
+        raise ValueError(f"Unknown layer_type: {layer_type}")
+
+
 class ActionExpertConfig:
     """Configuration for the action expert module.
 
@@ -357,13 +575,37 @@ class ActionExpertConfig:
         self.num_key_value_heads = num_key_value_heads
 
 
+class KeypointExpertConfig:
+    """Configuration for the GeoPredict keypoint expert module.
+
+    Mirrors :class:`ActionExpertConfig` — head_dim/num_(kv_)heads are inherited from the VLM so
+    that its K/V can be freely concatenated with the VLM's and the action expert's K/V for joint
+    attention in :func:`compute_layer_complete_3path`.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int | None = None,
+        intermediate_size: int | None = None,
+        head_dim: int | None = None,
+        num_attention_heads: int | None = None,
+        num_key_value_heads: int | None = None,
+    ):
+        self.head_dim = head_dim
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+
+
 class InternVLAA15WithExpertModel(nn.Module):
-    """Qwen3_5 model with action expert for InternVLAA15."""
+    """Qwen3_5 model with action expert (and, optionally, a GeoPredict keypoint expert) for InternVLAA15."""
 
     def __init__(
         self,
         vlm_model_name_or_path: str = "Qwen/Qwen3.5-2B",
         action_expert_config: ActionExpertConfig | None = None,
+        keypoint_expert_config: KeypointExpertConfig | None = None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
     ):
         super().__init__()
@@ -409,6 +651,39 @@ class InternVLAA15WithExpertModel(nn.Module):
         self.action_expert = Qwen3_5TextModel(config=action_expert_config_hf)
         self.action_expert.embed_tokens = None
 
+        self.keypoint_expert = None
+        if keypoint_expert_config is not None:
+            if keypoint_expert_config.head_dim is None:
+                keypoint_expert_config.head_dim = vlm_text_config.head_dim
+            if keypoint_expert_config.hidden_size is None:
+                keypoint_expert_config.hidden_size = vlm_text_config.hidden_size
+            if keypoint_expert_config.intermediate_size is None:
+                keypoint_expert_config.intermediate_size = vlm_text_config.intermediate_size
+
+            keypoint_expert_config.num_attention_heads = vlm_text_config.num_attention_heads
+            keypoint_expert_config.num_key_value_heads = vlm_text_config.num_key_value_heads
+
+            keypoint_expert_config_hf = CONFIG_MAPPING["qwen3_5_text"]()
+            keypoint_expert_config_hf.head_dim = keypoint_expert_config.head_dim
+            keypoint_expert_config_hf.hidden_size = keypoint_expert_config.hidden_size
+            keypoint_expert_config_hf.intermediate_size = keypoint_expert_config.intermediate_size
+            keypoint_expert_config_hf.num_attention_heads = keypoint_expert_config.num_attention_heads
+            keypoint_expert_config_hf.num_key_value_heads = keypoint_expert_config.num_key_value_heads
+            keypoint_expert_config_hf.num_hidden_layers = vlm_text_config.num_hidden_layers
+            keypoint_expert_config_hf.max_position_embeddings = vlm_text_config.max_position_embeddings
+            keypoint_expert_config_hf.rope_parameters = vlm_text_config.rope_parameters
+            keypoint_expert_config_hf.rms_norm_eps = vlm_text_config.rms_norm_eps
+
+            keypoint_expert_config_hf.layer_types = vlm_text_config.layer_types
+            keypoint_expert_config_hf.linear_conv_kernel_dim = vlm_text_config.linear_conv_kernel_dim
+            keypoint_expert_config_hf.linear_key_head_dim = vlm_text_config.linear_key_head_dim
+            keypoint_expert_config_hf.linear_value_head_dim = vlm_text_config.linear_value_head_dim
+            keypoint_expert_config_hf.linear_num_key_heads = vlm_text_config.linear_num_key_heads
+            keypoint_expert_config_hf.linear_num_value_heads = vlm_text_config.linear_num_value_heads
+
+            self.keypoint_expert = Qwen3_5TextModel(config=keypoint_expert_config_hf)
+            self.keypoint_expert.embed_tokens = None
+
         self.to_bfloat16_for_selected_params(precision)
 
     def to_bfloat16_for_selected_params(
@@ -440,9 +715,25 @@ class InternVLAA15WithExpertModel(nn.Module):
         inputs_embeds: list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
         knowledge_insulation: bool = False,
+        knowledge_insulation_kpt: bool = False,
+        kpt_to_action_detach: bool = False,
         use_sdpa: bool = False,
         linear_attn_mask: torch.Tensor | None = None,
     ):
+        if len(inputs_embeds) == 3:
+            return self._forward_3path(
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                knowledge_insulation=knowledge_insulation,
+                knowledge_insulation_kpt=knowledge_insulation_kpt,
+                kpt_to_action_detach=kpt_to_action_detach,
+                use_sdpa=use_sdpa,
+                linear_attn_mask=linear_attn_mask,
+            )
+
         if inputs_embeds[1] is None:
             prefix_output = self.qwen3_5.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
@@ -535,6 +826,143 @@ class InternVLAA15WithExpertModel(nn.Module):
 
         return [prefix_output, suffix_output], prefix_past_key_values
 
+    def _forward_3path(
+        self,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: list[torch.FloatTensor | None] | None = None,
+        use_cache: bool | None = None,
+        knowledge_insulation: bool = False,
+        knowledge_insulation_kpt: bool = False,
+        kpt_to_action_detach: bool = False,
+        use_sdpa: bool = False,
+        linear_attn_mask: torch.Tensor | None = None,
+    ):
+        """3-path dispatch: [prefix (VLM), keypoint-expert suffix, action-expert suffix].
+
+        Mirrors the 2-path ``forward`` above with an extra keypoint-expert path. The three
+        single-path branches below (used for KV-cache priming during inference — see
+        ``InternVLAA15.sample_actions``) exploit the fact that ``Qwen3_5TextModel.forward``
+        will happily read a ``past_key_values`` cache produced by a *different* nn.Module,
+        appending its own newly-computed K/V (using its own projection weights) to it. Calling
+        the three "experts" in sequence (prefix -> keypoint -> action), each with
+        ``past_key_values`` carried over from the previous call, therefore reproduces exactly
+        the same joint-attention semantics as the "full" branch below (prefix self-attn; kpt
+        attends to [prefix, kpt]; action attends to [prefix, kpt, action]) without having to
+        recompute the prefix/kpt segments at every action-expert call.
+
+        NOTE: this inference-time (cached KV) 3-path plumbing is implemented for API
+        completeness (see ``InternVLAA15.sample_actions``/``denoise_step``) but is only
+        exercised by lightweight unit tests in this change — it has not been validated against
+        an actual SAPIEN/RoboTwin rollout (out of scope, see LOG.md §8).
+        """
+        prefix_embeds, kpt_embeds, action_embeds = inputs_embeds
+
+        if kpt_embeds is None and action_embeds is None:
+            prefix_output = self.qwen3_5.language_model.forward(
+                inputs_embeds=prefix_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+            return [prefix_output.last_hidden_state, None, None], prefix_output.past_key_values
+
+        if prefix_embeds is None and action_embeds is None:
+            kpt_output = self.keypoint_expert.forward(
+                inputs_embeds=kpt_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+            return [None, kpt_output.last_hidden_state, None], kpt_output.past_key_values
+
+        if prefix_embeds is None and kpt_embeds is None:
+            action_output = self.action_expert.forward(
+                inputs_embeds=action_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+            return [None, None, action_output.last_hidden_state], action_output.past_key_values
+
+        # Full joint forward (training, or single-shot priming with all 3 segments at once).
+        models = [self.qwen3_5.language_model, self.keypoint_expert, self.action_expert]
+        num_layers = self.qwen3_5.config.text_config.num_hidden_layers
+
+        prefix_len = prefix_embeds.shape[1]
+        kpt_len = kpt_embeds.shape[1]
+
+        use_gradient_checkpointing = (
+            hasattr(self.action_expert, "gradient_checkpointing")
+            and self.action_expert.gradient_checkpointing
+            and self.training
+        ) or (
+            hasattr(self, "gradient_checkpointing")
+            and self.gradient_checkpointing
+            and self.training
+        )
+
+        for layer_idx in range(num_layers):
+            if use_gradient_checkpointing:
+                inputs_embeds = torch.utils.checkpoint.checkpoint(
+                    compute_layer_complete_3path,
+                    layer_idx,
+                    inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    self.qwen3_5,
+                    self.keypoint_expert,
+                    self.action_expert,
+                    prefix_len,
+                    kpt_len,
+                    knowledge_insulation,
+                    knowledge_insulation_kpt,
+                    kpt_to_action_detach,
+                    use_sdpa,
+                    linear_attn_mask,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                inputs_embeds = compute_layer_complete_3path(
+                    layer_idx,
+                    inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    qwen3_5=self.qwen3_5,
+                    keypoint_expert=self.keypoint_expert,
+                    action_expert=self.action_expert,
+                    prefix_len=prefix_len,
+                    kpt_len=kpt_len,
+                    knowledge_insulation=knowledge_insulation,
+                    knowledge_insulation_kpt=knowledge_insulation_kpt,
+                    kpt_to_action_detach=kpt_to_action_detach,
+                    use_sdpa=use_sdpa,
+                    linear_attn_mask=linear_attn_mask,
+                )
+
+        def compute_final_norms(inputs_embeds):
+            outputs_embeds = []
+            for i, hidden_states in enumerate(inputs_embeds):
+                outputs_embeds.append(models[i].norm(hidden_states))
+            return outputs_embeds
+
+        if use_gradient_checkpointing:
+            outputs_embeds = torch.utils.checkpoint.checkpoint(
+                compute_final_norms,
+                inputs_embeds,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            outputs_embeds = compute_final_norms(inputs_embeds)
+
+        return outputs_embeds, None
+
 
 class InternVLAA15(nn.Module):
 
@@ -547,9 +975,17 @@ class InternVLAA15(nn.Module):
             intermediate_size=config.action_expert_intermediate_size,
         )
 
+        keypoint_expert_config = None
+        if config.enable_keypoint_predictor:
+            keypoint_expert_config = KeypointExpertConfig(
+                hidden_size=config.kpt_expert_hidden_size,
+                intermediate_size=config.kpt_expert_intermediate_size,
+            )
+
         self.qwen3_5_with_expert = InternVLAA15WithExpertModel(
             vlm_model_name_or_path=config.vlm_model_name_or_path,
             action_expert_config=action_expert_config,
+            keypoint_expert_config=keypoint_expert_config,
             precision=config.dtype,
         )
 
@@ -564,6 +1000,31 @@ class InternVLAA15(nn.Module):
         self.action_time_mlp_in = nn.Linear(2 * action_expert_hidden_size, action_expert_hidden_size)
         self.action_time_mlp_out = nn.Linear(action_expert_hidden_size, action_expert_hidden_size)
 
+        if config.enable_keypoint_predictor:
+            kpt_hidden_size = self.qwen3_5_with_expert.keypoint_expert.config.hidden_size
+            j = config.num_keypoint_joints
+
+            self.track_encoder = TrackEncoder(
+                input_dim=config.keypoint_track_input_dim,
+                output_dim=kpt_hidden_size,
+                patch_size=config.keypoint_track_patch_size,
+                embed_dim=config.keypoint_track_embed_dim,
+                query_dim=config.keypoint_track_query_dim,
+                num_queries=1,
+                num_heads=config.keypoint_track_num_heads,
+                ff_dim=config.keypoint_track_ff_dim,
+                max_seq_len=config.keypoint_history_max_len,
+            )
+            self.kpt_state_proj = nn.Linear(config.max_state_dim, kpt_hidden_size)
+            self.keypoint_embedding = nn.Embedding(j, kpt_hidden_size)
+            self.keypoint_out_proj = nn.Linear(kpt_hidden_size, 3)
+            # Sinusoidal position embedding indexed by (future_step - current_step - 1) in
+            # [0, chunk_size), added onto the current-frame keypoint token to predict the
+            # future-frame keypoints (mirrors GeoPredict's `future_pos`, see design doc §5.2).
+            future_kpt_pos_embed = get_1d_sincos_pos_embed(
+                kpt_hidden_size, torch.arange(config.chunk_size, dtype=torch.float32), base=100
+            )
+            self.register_buffer("future_kpt_pos_embed", future_kpt_pos_embed)
 
         self.learnable_tokens = nn.Parameter(
             torch.zeros(config.num_learnable_tokens, action_expert_hidden_size)
@@ -600,8 +1061,42 @@ class InternVLAA15(nn.Module):
             self.sample_actions = torch.compile(self.sample_actions, mode=config.compile_mode)
             self.forward = torch.compile(self.forward, dynamic=True, mode=config.compile_mode)
 
+        if config.enable_keypoint_predictor:
+            self.post_init_keypoint_weights()
+            if config.geopredict_checkpoint_path:
+                self.load_geopredict_keypoint_weights(config.geopredict_checkpoint_path)
+
         self.set_requires_grad()
         self._setup_wan_grad()
+
+    def post_init_keypoint_weights(self):
+        """Warm-start the keypoint expert from the (already-initialized) action expert's weights.
+
+        Both experts share the exact same Qwen3.5-text architecture/shape (see
+        ``InternVLAA15WithExpertModel.__init__``), so a plain ``strict=True`` state-dict copy is
+        always shape-compatible. See design doc §6.1 (Stage 3: weight initialization).
+        """
+        if not self.config.enable_keypoint_predictor or not self.config.init_kpt_expert_from_action:
+            return
+        src_state = self.qwen3_5_with_expert.action_expert.state_dict()
+        missing, unexpected = self.qwen3_5_with_expert.keypoint_expert.load_state_dict(
+            src_state, strict=True
+        )
+        if missing or unexpected:
+            raise RuntimeError(
+                f"post_init_keypoint_weights: unexpected mismatch, missing={missing}, unexpected={unexpected}"
+            )
+        logging.info("post_init_keypoint_weights: initialized keypoint_expert from action_expert weights.")
+
+    def load_geopredict_keypoint_weights(self, checkpoint_path: str):
+        """Selectively load :attr:`track_encoder` weights from a real GeoPredict checkpoint
+        (see design doc §6.2 and ``keypoints.py::load_geopredict_track_encoder_weights``)."""
+        loaded, skipped = load_geopredict_track_encoder_weights(self.track_encoder, checkpoint_path)
+        logging.info(
+            "load_geopredict_keypoint_weights: loaded %d TrackEncoder keys from %s (skipped %d, e.g. track_fusion_layer).",
+            len(loaded), checkpoint_path, len(skipped),
+        )
+        return loaded, skipped
 
     def set_requires_grad(self):
         if self.config.freeze_vision_encoder:
@@ -614,11 +1109,28 @@ class InternVLAA15(nn.Module):
             for params in self.qwen3_5_with_expert.qwen3_5.parameters():
                 params.requires_grad = False
 
+        if self.config.enable_keypoint_predictor and self.config.freeze_keypoint_modules:
+            kpt_modules = [
+                self.track_encoder,
+                self.kpt_state_proj,
+                self.keypoint_embedding,
+                self.keypoint_out_proj,
+                self.qwen3_5_with_expert.keypoint_expert,
+            ]
+            for module in kpt_modules:
+                if module is None:
+                    continue
+                module.eval()
+                for params in module.parameters():
+                    params.requires_grad = False
+
     def gradient_checkpointing_enable(self):
         self.gradient_checkpointing_enabled = True
         self.qwen3_5_with_expert.qwen3_5.language_model.gradient_checkpointing = True
         self.qwen3_5_with_expert.qwen3_5.visual.gradient_checkpointing = True
         self.qwen3_5_with_expert.action_expert.gradient_checkpointing = True
+        if self.config.enable_keypoint_predictor:
+            self.qwen3_5_with_expert.keypoint_expert.gradient_checkpointing = True
         logging.info("Enabled gradient checkpointing for InternVLAA15 model")
 
     def gradient_checkpointing_disable(self):
@@ -626,6 +1138,8 @@ class InternVLAA15(nn.Module):
         self.qwen3_5_with_expert.qwen3_5.language_model.gradient_checkpointing = False
         self.qwen3_5_with_expert.qwen3_5.visual.gradient_checkpointing = False
         self.qwen3_5_with_expert.action_expert.gradient_checkpointing = False
+        if self.config.enable_keypoint_predictor:
+            self.qwen3_5_with_expert.keypoint_expert.gradient_checkpointing = False
         logging.info("Disabled gradient checkpointing for InternVLAA15 model")
 
     def _apply_checkpoint(self, func, *args, **kwargs):
@@ -768,6 +1282,8 @@ class InternVLAA15(nn.Module):
         fast_token_mask: Tensor | None = None,
         noise=None,
         num_steps=None,
+        his_kpts: Tensor | None = None,
+        his_len: Tensor | None = None,
     ) -> Tensor:
         if num_steps is None:
             num_steps = self.config.num_inference_steps
@@ -804,15 +1320,63 @@ class InternVLAA15(nn.Module):
             knowledge_insulation=self.config.knowledge_insulation,
         )
 
+        max_prefix_position_ids = prefix_position_ids.max(dim=-1, keepdim=True).values
+
+        # GeoPredict keypoint fusion (inference path): prime a second cache segment for the
+        # keypoint expert (attending only to the already-cached prefix), computed *once* per
+        # env step (unlike the action expert, which is re-run at every one of the `num_steps`
+        # flow-matching iterations below). See ``_forward_3path`` docstring for how a shared
+        # `past_key_values` cache can be extended across different nn.Module "experts".
+        #
+        # NOTE: this inference path is implemented for API completeness (per design doc §9) but
+        # is only smoke-tested with a tiny mock model in tests/test_step6_inference.py — it has
+        # not been validated against a real SAPIEN/RoboTwin rollout (out of scope; see LOG.md).
+        kpt_prefix_pad_masks = prefix_pad_masks
+        if self.config.enable_keypoint_predictor:
+            kpt_embs, kpt_pad_masks, kpt_att_masks = self.embed_kpt_suffix(state, his_kpts, his_len)
+            kpt_embs = kpt_embs.to(dtype=prefix_embs.dtype)
+            kpt_len = kpt_pad_masks.shape[1]
+
+            kpt_prefix_pad_2d = prefix_pad_masks[:, None, :].expand(bsize, kpt_len, prefix_pad_masks.shape[1])
+            kpt_att_2d_masks = make_att_2d_masks(kpt_pad_masks, kpt_att_masks)
+            kpt_full_att_2d_masks = torch.cat([kpt_prefix_pad_2d, kpt_att_2d_masks], dim=2)
+            kpt_position_ids = (
+                torch.arange(1, kpt_len + 1).repeat(3, 1, 1).to(max_prefix_position_ids)
+                + max_prefix_position_ids
+            )
+            kpt_full_att_2d_masks_4d = self._prepare_attention_masks_4d(kpt_full_att_2d_masks)
+            self.qwen3_5_with_expert.keypoint_expert.config._attn_implementation = "eager"
+
+            _, past_key_values = self.qwen3_5_with_expert.forward(
+                attention_mask=kpt_full_att_2d_masks_4d,
+                position_ids=kpt_position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=[None, kpt_embs, None],
+                use_cache=True,
+                knowledge_insulation_kpt=self.config.knowledge_insulation_kpt,
+            )
+
+            max_prefix_position_ids = max_prefix_position_ids + kpt_len
+            kpt_prefix_pad_masks = torch.cat([prefix_pad_masks, kpt_pad_masks], dim=1)
+
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
         x_t = noise
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
-        max_prefix_position_ids = prefix_position_ids.max(dim=-1, keepdim=True).values
 
         if self.config.block_action_attend_fast_tokens:
             fast_mask = self._compute_fast_token_mask(lang_tokens, fast_token_mask)
+            if self.config.enable_keypoint_predictor:
+                # `denoise_step` below is called with `prefix_pad_masks=kpt_prefix_pad_masks`
+                # (length prefix_len + kpt_len), but `fast_mask` only covers the original
+                # `lang_tokens` (length prefix_len). Pad with False for the keypoint segment —
+                # keypoint tokens are never "fast" (FAST-tokenized action) tokens and must never
+                # be blocked — so the two masks' last dimension matches inside denoise_step.
+                fast_mask = torch.cat(
+                    [fast_mask, torch.zeros(bsize, kpt_len, dtype=fast_mask.dtype, device=fast_mask.device)],
+                    dim=1,
+                )
         else:
             fast_mask = None
 
@@ -820,12 +1384,13 @@ class InternVLAA15(nn.Module):
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(
                 state,
-                prefix_pad_masks,
+                kpt_prefix_pad_masks,
                 past_key_values,
                 max_prefix_position_ids,
                 x_t.to(dtype),
                 expanded_time.to(dtype),
                 fast_mask=fast_mask,
+                use_kpt=self.config.enable_keypoint_predictor,
             )
             x_t = x_t + dt * v_t
             time += dt
@@ -841,7 +1406,16 @@ class InternVLAA15(nn.Module):
         x_t,
         timestep,
         fast_mask: Tensor | None = None,
+        use_kpt: bool = False,
     ):
+        """One flow-matching velocity-prediction step.
+
+        Args:
+            prefix_pad_masks: padding mask covering everything the action expert attends to
+                that is *already cached* in ``past_key_values`` — just the VLM prefix in the
+                2-path case, or ``[prefix; keypoint]`` when ``use_kpt=True`` (see
+                ``sample_actions``, where this is ``kpt_prefix_pad_masks``).
+        """
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -865,22 +1439,33 @@ class InternVLAA15(nn.Module):
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
         self.qwen3_5_with_expert.action_expert.config._attn_implementation = "eager"
 
-        outputs_embeds, _ = self.qwen3_5_with_expert.forward(
-            attention_mask=full_att_2d_masks_4d,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=[None, suffix_embs],
-            use_cache=False,
-            knowledge_insulation=self.config.knowledge_insulation,
-        )
+        if use_kpt:
+            outputs_embeds, _ = self.qwen3_5_with_expert.forward(
+                attention_mask=full_att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=[None, None, suffix_embs],
+                use_cache=False,
+                kpt_to_action_detach=self.config.kpt_to_action_detach,
+            )
+            suffix_out = outputs_embeds[2]
+        else:
+            outputs_embeds, _ = self.qwen3_5_with_expert.forward(
+                attention_mask=full_att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=[None, suffix_embs],
+                use_cache=False,
+                knowledge_insulation=self.config.knowledge_insulation,
+            )
+            suffix_out = outputs_embeds[1]
 
-        suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
 
     def _setup_wan_grad(self):
-        if self.config.action_loss_only or self.config.freeze_learnable_tokens:
+        if self.config.freeze_learnable_tokens:
             self.learnable_tokens.requires_grad = False
             for p in self.learnable_tokens_in_proj.parameters():
                 p.requires_grad = False
@@ -973,6 +1558,68 @@ class InternVLAA15(nn.Module):
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
         return embs, pad_masks, att_masks
+
+    def embed_kpt_suffix(self, state, his_kpts=None, his_len=None):
+        """Build the keypoint-expert suffix: ``[state(1)] [history-track(J)] [query(J)]``.
+
+        Args:
+            state: ``[B, max_state_dim]`` robot state (same tensor used by the action expert's
+                state token, see design doc §5.1).
+            his_kpts: ``[B, H, J, 3]`` history of 3D keypoint positions (zero-filled when the
+                dataset has no ground-truth keypoints, i.e. Phase 1 — see
+                ``Extract3DKeypointTransformFn``). If ``None``, a zero tensor is used.
+            his_len: ``[B]`` number of valid (non-padding) history frames. If ``None``, treated
+                as all-zero (no history).
+
+        Returns:
+            (embs ``[B, 1+2J, D]``, pad_masks ``[B, 1+2J]``, att_masks ``[B, 1+2J]``) — the last
+            ``J`` "query" tokens (``keypoint_embedding.weight``) are the ones whose *output*
+            hidden states get projected (via ``keypoint_out_proj``) into the predicted current
+            and future 3D keypoint positions (see ``InternVLAA15.forward``).
+        """
+        j = self.config.num_keypoint_joints
+        kpt_hidden_size = self.qwen3_5_with_expert.keypoint_expert.config.hidden_size
+        dtype = self.kpt_state_proj.weight.dtype
+        bsize = state.shape[0]
+        device = state.device
+
+        embs = []
+        pad_masks = []
+        att_masks = []
+
+        state_in = state.to(dtype) if state.dtype != dtype else state
+        state_emb = self._apply_checkpoint(lambda s: self.kpt_state_proj(s), state_in)
+        embs.append(state_emb[:, None, :])
+        pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
+        att_masks += [1]
+
+        if his_kpts is None or his_len is None:
+            his_kpts = torch.zeros(bsize, self.config.keypoint_history_max_len, j, 3, device=device)
+            his_len = torch.zeros(bsize, dtype=torch.long, device=device)
+        his_kpts = his_kpts.to(dtype)
+        hist_kpt_emb = self._apply_checkpoint(
+            lambda p, ln: self.track_encoder(p, ln), his_kpts, his_len
+        )
+        embs.append(hist_kpt_emb.to(dtype))
+        pad_masks.append(torch.ones(bsize, j, dtype=torch.bool, device=device))
+        att_masks += [1] + [0] * (j - 1)
+
+        query_kpt_emb = self.keypoint_embedding.weight[None].expand(bsize, -1, -1).to(dtype)
+        embs.append(query_kpt_emb)
+        pad_masks.append(torch.ones(bsize, j, dtype=torch.bool, device=device))
+        att_masks += [1] + [0] * (j - 1)
+
+        embs = torch.cat(embs, dim=1)
+        pad_masks = torch.cat(pad_masks, dim=1)
+        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+
+        return embs, pad_masks, att_masks
+
+    def get_keypoint_token_output(self, kpt_out):
+        """Slice the last J tokens (the query tokens) out of the keypoint expert's suffix output."""
+        j = self.config.num_keypoint_joints
+        return kpt_out[:, -j:]
 
     def get_learnable_token_output(self, suffix_out):
         start = 1  # skip state token
@@ -1110,11 +1757,21 @@ class InternVLAA15(nn.Module):
         video_mask: Tensor | None = None,
         noise=None,
         time=None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Training forward: action loss + VLM loss + video loss.
+        his_kpts: Tensor | None = None,
+        his_len: Tensor | None = None,
+        kpt_t: Tensor | None = None,
+        kpt_future: Tensor | None = None,
+        kpt_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Training forward: action loss + VLM loss + video loss + (optional) keypoint losses.
 
         Args:
             video_mask: [B] bool tensor, True for samples with real video frames.
+            his_kpts: [B, H, J, 3] keypoint history (only used if enable_keypoint_predictor).
+            his_len: [B] number of valid history frames.
+            kpt_t: [B, J, 3] current-frame keypoint ground truth.
+            kpt_future: [B, C, J, 3] future-frame keypoint ground truth.
+            kpt_mask: [B] bool, True where real keypoint GT is available (Phase 2 samples).
         """
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -1130,15 +1787,26 @@ class InternVLAA15(nn.Module):
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, time)
 
-        if (
+        use_kpt = self.config.enable_keypoint_predictor
+        if use_kpt:
+            kpt_embs, kpt_pad_masks, kpt_att_masks = self.embed_kpt_suffix(state, his_kpts, his_len)
+
+        model_is_bf16 = (
             self.qwen3_5_with_expert.qwen3_5.language_model.layers[0].mlp.up_proj.weight.dtype
             == torch.bfloat16
-        ):
+        )
+        if model_is_bf16:
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+            if use_kpt:
+                kpt_embs = kpt_embs.to(dtype=torch.bfloat16)
 
-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+        if use_kpt:
+            pad_masks = torch.cat([prefix_pad_masks, kpt_pad_masks, suffix_pad_masks], dim=1)
+            att_masks = torch.cat([prefix_att_masks, kpt_att_masks, suffix_att_masks], dim=1)
+        else:
+            pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+            att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
 
@@ -1175,30 +1843,65 @@ class InternVLAA15(nn.Module):
         else:
             max_input_pos = prefix_position_ids.max(dim=-1, keepdim=True).values
 
-        suffix_position_ids = (
-            torch.arange(1, suffix_len + 1).repeat(3, 1, 1).to(max_input_pos)
-            + max_input_pos
-        )
-        position_ids = torch.cat([prefix_position_ids, suffix_position_ids], dim=-1)
+        if use_kpt:
+            kpt_len = kpt_pad_masks.shape[1]
+            kpt_position_ids = (
+                torch.arange(1, kpt_len + 1).repeat(3, 1, 1).to(max_input_pos) + max_input_pos
+            )
+            action_offset = max_input_pos + kpt_len
+            suffix_position_ids = (
+                torch.arange(1, suffix_len + 1).repeat(3, 1, 1).to(max_input_pos) + action_offset
+            )
+            position_ids = torch.cat(
+                [prefix_position_ids, kpt_position_ids, suffix_position_ids], dim=-1
+            )
+        else:
+            suffix_position_ids = (
+                torch.arange(1, suffix_len + 1).repeat(3, 1, 1).to(max_input_pos)
+                + max_input_pos
+            )
+            position_ids = torch.cat([prefix_position_ids, suffix_position_ids], dim=-1)
 
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
-        def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids):
-            (prefix_out, suffix_out), _ = self.qwen3_5_with_expert.forward(
-                attention_mask=att_2d_masks_4d,
-                position_ids=position_ids,
-                past_key_values=None,
-                inputs_embeds=[prefix_embs, suffix_embs],
-                use_cache=False,
-                knowledge_insulation=self.config.knowledge_insulation,
-                use_sdpa=self.config.use_sdpa,
-                linear_attn_mask=pad_masks,
-            )
-            return prefix_out, suffix_out
+        if use_kpt:
 
-        prefix_out, suffix_out = self._apply_checkpoint(
-            forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids
-        )
+            def forward_func(prefix_embs, kpt_embs, suffix_embs, att_2d_masks_4d, position_ids):
+                (prefix_out, kpt_out, suffix_out), _ = self.qwen3_5_with_expert.forward(
+                    attention_mask=att_2d_masks_4d,
+                    position_ids=position_ids,
+                    past_key_values=None,
+                    inputs_embeds=[prefix_embs, kpt_embs, suffix_embs],
+                    use_cache=False,
+                    knowledge_insulation=self.config.knowledge_insulation,
+                    knowledge_insulation_kpt=self.config.knowledge_insulation_kpt,
+                    kpt_to_action_detach=self.config.kpt_to_action_detach,
+                    use_sdpa=self.config.use_sdpa,
+                    linear_attn_mask=pad_masks,
+                )
+                return prefix_out, kpt_out, suffix_out
+
+            prefix_out, kpt_out, suffix_out = self._apply_checkpoint(
+                forward_func, prefix_embs, kpt_embs, suffix_embs, att_2d_masks_4d, position_ids
+            )
+        else:
+
+            def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids):
+                (prefix_out, suffix_out), _ = self.qwen3_5_with_expert.forward(
+                    attention_mask=att_2d_masks_4d,
+                    position_ids=position_ids,
+                    past_key_values=None,
+                    inputs_embeds=[prefix_embs, suffix_embs],
+                    use_cache=False,
+                    knowledge_insulation=self.config.knowledge_insulation,
+                    use_sdpa=self.config.use_sdpa,
+                    linear_attn_mask=pad_masks,
+                )
+                return prefix_out, suffix_out
+
+            prefix_out, suffix_out = self._apply_checkpoint(
+                forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids
+            )
 
         # VQA loss (per-token for detailed logging)
         if labels is not None:
@@ -1230,7 +1933,7 @@ class InternVLAA15(nn.Module):
             loss_action = F.mse_loss(u_t, v_t, reduction="none")
 
         # Video loss — only computed for samples with real video frames
-        if self.config.action_loss_only:
+        if self.config.action_loss_only or self.config.video_loss_weight == 0.0:
             video_loss = torch.tensor(0.0, device=actions.device)
         else:
             has_video = video_mask.any() if video_mask is not None else (video_frames is not None)
@@ -1243,7 +1946,39 @@ class InternVLAA15(nn.Module):
             else:
                 video_loss = torch.tensor(0.0, device=actions.device)
 
-        return loss_action, loss_vqa, video_loss, loss_per_token, token_mask
+        # Keypoint losses (GeoPredict fusion, see design doc §5.2/§8). Computed per-sample so the
+        # caller (InternVLAA15Policy.forward) can apply `kpt_mask` (Phase 1 samples have no GT and
+        # must be excluded from the mean) exactly like it already does for loss_action/loss_vqa.
+        if use_kpt:
+            j = self.config.num_keypoint_joints
+            kpt_query_out = self.get_keypoint_token_output(kpt_out).to(dtype=torch.float32)  # [B, J, D]
+            pred_kpt_current = self.keypoint_out_proj(kpt_query_out)  # [B, J, 3]
+
+            if kpt_t is None:
+                kpt_t = torch.zeros(B, j, 3, device=actions.device, dtype=torch.float32)
+            loss_kpt_current = F.mse_loss(
+                pred_kpt_current, kpt_t.to(torch.float32), reduction="none"
+            ).mean(dim=(-1, -2))  # [B]
+
+            chunk_size = self.config.chunk_size
+            future_pos = self.future_kpt_pos_embed.to(
+                device=kpt_query_out.device, dtype=torch.float32
+            )  # [C, D]
+            future_kpt_tokens = kpt_query_out.unsqueeze(1) + future_pos[None, :, None, :]  # [B, C, J, D]
+            future_kpt_pred = self.keypoint_out_proj(
+                future_kpt_tokens.reshape(B * chunk_size, j, -1)
+            ).reshape(B, chunk_size, j, 3)
+
+            if kpt_future is None:
+                kpt_future = torch.zeros(B, chunk_size, j, 3, device=actions.device, dtype=torch.float32)
+            loss_kpt_future = F.mse_loss(
+                future_kpt_pred, kpt_future.to(torch.float32), reduction="none"
+            ).mean(dim=(-1, -2, -3))  # [B]
+        else:
+            loss_kpt_current = torch.zeros(B, device=actions.device, dtype=torch.float32)
+            loss_kpt_future = torch.zeros(B, device=actions.device, dtype=torch.float32)
+
+        return loss_action, loss_vqa, video_loss, loss_per_token, token_mask, loss_kpt_current, loss_kpt_future
 
     # ------------------------------------------------------------------
     # WAN DiT forward (cross-attention conditioning)
@@ -1437,7 +2172,56 @@ class InternVLAA15Policy(PreTrainedPolicy):
         return state
 
     def get_optim_params(self) -> dict:
-        return self.parameters()
+        cfg = self.config
+        scales = (cfg.vlm_lr_scale, cfg.action_expert_lr_scale, cfg.kpt_expert_lr_scale, cfg.track_encoder_lr_scale)
+        if not cfg.enable_keypoint_predictor or all(s == 1.0 for s in scales):
+            # No per-module LR scaling requested: preserve the exact historical behavior (a flat
+            # parameter iterator) for every existing (non-keypoint) training config.
+            return self.parameters()
+
+        model = self.model
+        kpt_modules = [ #@# 加入了kpt模态,要对处理该模态的trf的参数设置是否可训练或不同的lr ???但其它的模块也要不同的冻结时刻与lr吧
+            model.track_encoder,
+            model.kpt_state_proj,
+            model.keypoint_embedding,
+            model.keypoint_out_proj,
+            model.qwen3_5_with_expert.keypoint_expert,
+        ]
+        kpt_param_ids = {id(p) for m in kpt_modules for p in m.parameters()}
+        action_param_ids = {id(p) for p in model.qwen3_5_with_expert.action_expert.parameters()}
+        vlm_param_ids = {id(p) for p in model.qwen3_5_with_expert.qwen3_5.parameters()}
+
+        track_encoder_params, kpt_expert_params, action_params, vlm_params, other_params = (
+            [], [], [], [], []
+        )
+        for p in self.parameters():
+            if not p.requires_grad:
+                continue
+            pid = id(p)
+            if any(pid == id(tp) for tp in model.track_encoder.parameters()):
+                track_encoder_params.append(p)
+            elif pid in kpt_param_ids:
+                kpt_expert_params.append(p)
+            elif pid in action_param_ids:
+                action_params.append(p)
+            elif pid in vlm_param_ids:
+                vlm_params.append(p)
+            else:
+                other_params.append(p)
+
+        base_lr = cfg.optimizer_lr
+        groups = []
+        if track_encoder_params:
+            groups.append({"params": track_encoder_params, "lr": base_lr * cfg.track_encoder_lr_scale})
+        if kpt_expert_params:
+            groups.append({"params": kpt_expert_params, "lr": base_lr * cfg.kpt_expert_lr_scale})
+        if action_params:
+            groups.append({"params": action_params, "lr": base_lr * cfg.action_expert_lr_scale})
+        if vlm_params:
+            groups.append({"params": vlm_params, "lr": base_lr * cfg.vlm_lr_scale})
+        if other_params:
+            groups.append({"params": other_params, "lr": base_lr})
+        return groups
 
     def reset(self):
         self._action_queue = deque(maxlen=self.config.n_action_steps)
@@ -1467,9 +2251,17 @@ class InternVLAA15Policy(PreTrainedPolicy):
         fast_token_mask = batch.get(f"{OBS_PREFIX}fast_token_mask")
         state = self.prepare_state(batch)
 
+        kpt_kwargs = {} #@# 加了kpt模态,所以推理时也要把kpt输入加上
+        if self.config.enable_keypoint_predictor:
+            kpt_kwargs = {
+                "his_kpts": batch.get("observation.his_kpts"),
+                "his_len": batch.get("observation.his_len"),
+            }
+
         actions = self.model.sample_actions(
             pixel_values, image_grid_thw, lang_tokens, lang_masks, state,
             fast_token_mask=fast_token_mask,
+            **kpt_kwargs,
         )
 
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1589,13 +2381,26 @@ class InternVLAA15Policy(PreTrainedPolicy):
         else:
             video_mask = None
 
-        losses, losses_vlm, video_loss, loss_per_token, token_mask = self.model.forward(
-            pixel_values, image_grid_thw, lang_tokens, lang_masks,
-            state, actions,
-            labels=labels,
-            fast_token_mask=fast_token_mask,
-            video_frames=video_frames,
-            video_mask=video_mask,
+        kpt_kwargs = {}  #@# 增加了kpt模态,所以在forward时要增加相关输入
+        if self.config.enable_keypoint_predictor:
+            kpt_kwargs = {
+                "his_kpts": batch.get("observation.his_kpts"),
+                "his_len": batch.get("observation.his_len"),
+                "kpt_t": batch.get("observation.kpt_t"),
+                "kpt_future": batch.get("observation.kpt_future"),
+                "kpt_mask": batch.get("observation.kpt_mask"),
+            }
+
+        losses, losses_vlm, video_loss, loss_per_token, token_mask, loss_kpt_current, loss_kpt_future = (
+            self.model.forward(
+                pixel_values, image_grid_thw, lang_tokens, lang_masks,
+                state, actions,
+                labels=labels,
+                fast_token_mask=fast_token_mask,
+                video_frames=video_frames,
+                video_mask=video_mask,
+                **kpt_kwargs,
+            )
         )
 
         original_action_dim = batch[ACTION].shape[-1]
@@ -1637,6 +2442,28 @@ class InternVLAA15Policy(PreTrainedPolicy):
             loss_fast = zero
             loss_subtask = zero
 
+        # --- Keypoint branch (GeoPredict fusion): mask out Phase-1 samples with no real GT. ---
+        if self.config.enable_keypoint_predictor:
+            kpt_mask = batch.get("observation.kpt_mask")
+            if kpt_mask is not None and kpt_mask.any():
+                kpt_mask = kpt_mask.to(device=loss_kpt_current.device, dtype=torch.bool)
+                loss_kpt_cur = loss_kpt_current[kpt_mask].mean()
+                loss_kpt_fut = loss_kpt_future[kpt_mask].mean()
+            else:
+                # Phase 1 (indirect supervision only): no real GT anywhere in this batch, so the
+                # keypoint-reconstruction loss contributes 0 but the keypoint expert still
+                # receives gradients indirectly through the action expert's cross-attention to
+                # its K/V (see design doc §3 "indirect supervision").
+                loss_kpt_cur = zero
+                loss_kpt_fut = zero
+            loss_kpt = self.config.kpt_loss_weight * (#???
+                loss_kpt_cur + self.config.kpt_future_loss_weight * loss_kpt_fut
+            )
+        else:
+            loss_kpt_cur = zero
+            loss_kpt_fut = zero
+            loss_kpt = zero
+
         # --- Per-sample aggregation by vqa_type ---
         if self.config.enable_vqa_loss:
             vqa_type = batch["vqa_type"]
@@ -1647,10 +2474,10 @@ class InternVLAA15Policy(PreTrainedPolicy):
             loss_vlm = losses_vlm[vlm_mask].mean() if vlm_mask.any() else zero
 
             loss = (
-                10 * loss_fm_action
-                # loss_fm_action
+                self.config.action_loss_weight * loss_fm_action
                 + self.config.lambda_vqa * loss_vlm
                 + self.config.video_loss_weight * video_loss
+                + loss_kpt
             )
             # --- Build loss_dict ---
             loss_dict = {
@@ -1667,7 +2494,7 @@ class InternVLAA15Policy(PreTrainedPolicy):
         else:
             loss_fm_action = losses.mean()
             loss_vlm = zero
-            loss = loss_fm_action + self.config.video_loss_weight * video_loss
+            loss = self.config.action_loss_weight * loss_fm_action + self.config.video_loss_weight * video_loss + loss_kpt
             loss_dict = {
                 "loss": loss.item(),
                 # Action Expert branch
@@ -1675,4 +2502,9 @@ class InternVLAA15Policy(PreTrainedPolicy):
                 # Video branch
                 "loss_video": video_loss.item(),
             }
+
+        if self.config.enable_keypoint_predictor:
+            loss_dict["loss_kpt_current"] = loss_kpt_cur.item()
+            loss_dict["loss_kpt_future"] = loss_kpt_fut.item()
+
         return loss, loss_dict

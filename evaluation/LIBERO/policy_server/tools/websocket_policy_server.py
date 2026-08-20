@@ -40,6 +40,10 @@ class WebsocketPolicyServer:
             self._port,
             compression=None,
             max_size=None,
+            # Handler runs policy.infer synchronously; disable keepalive so a
+            # long first-sample does not trip ping timeout and drop the client.
+            ping_interval=None,
+            ping_timeout=None,
         ) as server:
             if self._idle_timeout > 0:
                 await self._idle_watchdog(server)
@@ -106,10 +110,12 @@ class WebsocketPolicyServer:
                 }
 
             try:
+                t0 = time.time()
                 if hasattr(self._policy, "predict_action"):
                     output = self._policy.predict_action(payload)
                 else:
                     output = self._policy.infer(payload)
+                logging.info("Inference done (request_id=%s) in %.1fs", req_id, time.time() - t0)
             except Exception as exc:
                 logging.exception("Policy inference error (request_id=%s)", req_id)
                 return {

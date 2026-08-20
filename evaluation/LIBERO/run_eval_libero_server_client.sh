@@ -236,6 +236,11 @@ PY
       conda activate "${CLIENT_ENV}"
       cd "${PROJ_ROOT}"
       export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
+      # NVIDIA EGL for headless MuJoCo/robosuite (PLATFORM_DEVICE).
+      export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${LD_LIBRARY_PATH:-}"
+      export __EGL_VENDOR_LIBRARY_DIRS="${__EGL_VENDOR_LIBRARY_DIRS:-${HOME}/.local/share/glvnd/egl_vendor.d}"
+      export MUJOCO_GL="${MUJOCO_GL:-egl}"
+      export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
       PYTHONPATH="${PROJ_ROOT}:${LIBERO_HOME}:${PYTHONPATH:-}" \
       python evaluation/LIBERO/eval_libero_server_client.py \
         --host "${HOST}" \
