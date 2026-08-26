@@ -15,6 +15,10 @@ set -euo pipefail
 #   bash launch/internvla_a15_geop_phase2_finetune_kptsim_8g.sh
 #   WAN_SMOKE=1 bash launch/internvla_a15_geop_phase2_finetune_kptsim_8g.sh
 #   SMOKE=1 bash launch/internvla_a15_geop_phase2_finetune_kptsim_8g.sh
+# hanging_mug (GCS RunPkg + GitHub, see b/d/itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_hngMg.md):
+#   DATA_REPO_ID=hanging_mug_kptsim_lrbv30 PROJ_ROOT=/tmp/SRC/itvlaGp \
+#     WARMUP_CKPT=/tmp/RunPkg/Ckp/warmup_hanging_mug_kptsim_400step/checkpoints/000400/pretrained_model \
+#     bash launch/internvla_a15_geop_phase2_finetune_kptsim_8g.sh
 ###############################################################################
 
 VENV_ROOT="${VENV_ROOT:-/tmp/itnvla15rbt20}"
@@ -46,7 +50,7 @@ WAN_DIR="${WAN_DIR:-${HF_HOME}/hub/Wan2.2-TI2V-5B}"
 VLM_MODEL_PATH="${VLM_MODEL_PATH:-Qwen/Qwen3.5-2B}"
 
 POLICY="internvla_a1_5"
-DATA_REPO_ID="stack_bowls_three_kptsim_lrbv30"
+DATA_REPO_ID="${DATA_REPO_ID:-stack_bowls_three_kptsim_lrbv30}"
 NORM_STATS="${NORM_STATS:-${HF_LEROBOT_HOME}/${DATA_REPO_ID}/norm_stat.json}"
 DIST_LOADING="${DIST_LOADING:-false}"
 
@@ -102,6 +106,7 @@ echo "VENV_ROOT=${VENV_ROOT}"
 echo "PROJ_ROOT=${PROJ_ROOT}"
 echo "HF_HOME=${HF_HOME}"
 echo "HF_LEROBOT_HOME=${HF_LEROBOT_HOME}"
+echo "DATA_REPO_ID=${DATA_REPO_ID}"
 echo "WARMUP_CKPT=${WARMUP_CKPT}"
 echo "WAN_DIR=${WAN_DIR}"
 echo "WAN_SMOKE=${WAN_SMOKE} SMOKE=${SMOKE} PROC=${NUM_PROCESSES} BS=${BATCH_SIZE} STEPS=${STEPS}"
