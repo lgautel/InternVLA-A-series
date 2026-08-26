@@ -378,7 +378,7 @@ BRANCH=b0728GeoP
 
 mkdir -p /tmp/SRC
 if [[ ! -d "${PROJ}/.git" ]]; then
-  git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git "${PROJ}"
+  git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git /tmp/SRC/itvlaGp
 else
   cd "${PROJ}"
   git fetch origin
