@@ -30,7 +30,7 @@ RUNPKG_ROOT="${RUNPKG_ROOT:-/tmp/RunPkg}"
 
 GCS_PKG="${GCS_PKG:-gs://physical-ai-data-eu/VENV/tmp/RP/RunPkg_hngMg0825.tar.zst}"
 GCS_VENV="${GCS_VENV:-gs://physical-ai-data-eu/VENV/tmp/itnvla15rbt20_0811.tar}"
-GCS_PROBE="${GCS_PROBE:-gs://physical-ai-data-eu/VENV/tmp/}"
+GCS_BASE="${GCS_BASE:-gs://physical-ai-data-eu/VENV/tmp/}"
 GCP_PROJECT="${GCP_PROJECT:-}"
 GCLOUD_SDK_DIR="${GCLOUD_SDK_DIR:-${HOME}/google-cloud-sdk}"
 
@@ -53,22 +53,23 @@ BATCH_SIZE="${BATCH_SIZE:-}"
 STEPS="${STEPS:-}"
 
 FROM_STAGE="${FROM_STAGE:-gcloud}"
-UNTIL_STAGE="${UNTIL_STAGE:-train}"
+UNTIL_STAGE="${UNTIL_STAGE:-upload}"
 
 DRY_RUN=0
 FORCE=0
 SKIP_WAN_SMOKE=0
 SKIP_SMOKE=0
 SKIP_TRAIN=0
+SKIP_UPLOAD=0
 
-STAGES=(gcloud runpkg venv install symlink wan data-check preflight wan-smoke smoke train)
+STAGES=(gcloud runpkg venv install symlink wan data-check preflight wan-smoke smoke train upload)
 
 usage() {
   cat <<'EOF'
 用法: itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.sh [选项]
 
 在源码已 clone 的 VM 上编排 Phase 2 SFT（不含评测）。
-默认跑完全部阶段，含 8 卡 10k。
+默认跑完全部阶段，含 8 卡 10k 及训练产物上传 GCS。
 
 路径:
   --proj-root PATH          仓库根（默认: 本脚本上两级）
@@ -76,7 +77,7 @@ usage() {
   --runpkg-root PATH        RunPkg 解压根（默认 /tmp/RunPkg）
   --gcs-pkg URI             RunPkg tar.zst GCS 路径
   --gcs-venv URI            venv tar GCS 路径
-  --gcs-probe URI           gcloud 登录探测前缀
+  --gcs-base URI            GCS 上传根目录（LOG_DIR 打成 tar 上传；训练异常时文件名加 _er）
   --gcp-project ID          可选 gcloud config set project
   --data-repo-id ID         LeRobot repo_id
   --data-dst-rel REL        包内数据相对路径
@@ -86,7 +87,7 @@ usage() {
   --launch-script PATH      Phase 2 launch 脚本
   --hf-home PATH            HF_HOME
   --hf-lerobot-home PATH    HF_LEROBOT_HOME
-  --log-dir PATH            日志目录（默认 /tmp/<DATA_REPO_ID>；正式 10k checkpoint 也写在这里）
+  --log-dir PATH            日志目录（默认 /tmp/JbOut2/<DATA_REPO_ID>yyMMddHHmm；正式 10k checkpoint 也写在这里）
 
 训练:
   --gpus N                  正式 10k 使用 N 卡（默认 8）；自动设 EXPECT_GPUS、PROC_PER_NODE
@@ -101,12 +102,13 @@ usage() {
   --skip-wan-smoke          跳过 WAN Smoke
   --skip-smoke              跳过 Smoke 100
   --skip-train              跳过 8 卡 10k
+  --skip-upload             跳过训练产物打包上传 GCS
   --force                   已存在的 RunPkg/venv 也重新下载解压
   --dry-run                 只打印命令
   -h, --help
 
 阶段 id（顺序）:
-  gcloud runpkg venv install symlink wan data-check preflight wan-smoke smoke train
+  gcloud runpkg venv install symlink wan data-check preflight wan-smoke smoke train upload
 
 环境变量与 CLI 同名（大写下划线），CLI 优先。
 EOF
@@ -189,7 +191,7 @@ while [[ $# -gt 0 ]]; do
     --runpkg-root)        RUNPKG_ROOT="$2"; shift 2 ;;
     --gcs-pkg)            GCS_PKG="$2"; shift 2 ;;
     --gcs-venv)           GCS_VENV="$2"; shift 2 ;;
-    --gcs-probe)          GCS_PROBE="$2"; shift 2 ;;
+    --gcs-base)          GCS_BASE="$2"; shift 2 ;;
     --gcp-project)        GCP_PROJECT="$2"; shift 2 ;;
     --gcloud-sdk-dir)     GCLOUD_SDK_DIR="$2"; shift 2 ;;
     --data-repo-id)       DATA_REPO_ID="$2"; shift 2 ;;
@@ -215,6 +217,7 @@ while [[ $# -gt 0 ]]; do
     --skip-wan-smoke)     SKIP_WAN_SMOKE=1; shift ;;
     --skip-smoke)         SKIP_SMOKE=1; shift ;;
     --skip-train)         SKIP_TRAIN=1; shift ;;
+    --skip-upload)        SKIP_UPLOAD=1; shift ;;
     --force)              FORCE=1; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
     -h|--help)            usage; exit 0 ;;
@@ -227,7 +230,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 须在 CLI 解析 DATA_REPO_ID / --log-dir 之后，默认日志目录才随任务名变化。
-LOG_DIR="${LOG_DIR:-/tmp/${DATA_REPO_ID}}"
+# 默认后缀 yyMMddHHmm（精确到分钟，如 2608261546），直接拼在 DATA_REPO_ID 后，避免同任务多次运行覆盖日志。
+LOG_DIR="${LOG_DIR:-/tmp/JbOut2/${DATA_REPO_ID}$(date +%y%m%d%H%M)}"
+GCS_BASE="${GCS_BASE%/}/"
 
 finalize_gpu_config
 
@@ -273,6 +278,7 @@ should_run() {
     wan-smoke) [[ "${SKIP_WAN_SMOKE}" -eq 0 ]] || return 1 ;;
     smoke)     [[ "${SKIP_SMOKE}" -eq 0 ]] || return 1 ;;
     train)     [[ "${SKIP_TRAIN}" -eq 0 ]] || return 1 ;;
+    upload)    [[ "${SKIP_UPLOAD}" -eq 0 ]] || return 1 ;;
   esac
   return 0
 }
@@ -399,29 +405,29 @@ ensure_gcloud_installed() {
 }
 
 can_read_gcs() {
-  gcloud storage ls "${GCS_PROBE}" >/dev/null 2>&1
+  gcloud storage ls "${GCS_BASE}" >/dev/null 2>&1
 }
 
 ensure_gcloud_login() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[dry-run] 将探测 GCS ${GCS_PROBE}，失败则 gcloud auth login --no-launch-browser"
+    echo "[dry-run] 将探测 GCS ${GCS_BASE}，失败则 gcloud auth login --no-launch-browser"
     return
   fi
   if can_read_gcs; then
-    echo "[skip] 已能读取 ${GCS_PROBE}"
+    echo "[skip] 已能读取 ${GCS_BASE}"
     gcloud auth list 2>/dev/null || true
     return
   fi
-  echo "[login] 无法读取 ${GCS_PROBE}，开始交互登录（SSH 下用浏览器授权码）"
+  echo "[login] 无法读取 ${GCS_BASE}，开始交互登录（SSH 下用浏览器授权码）"
   gcloud auth login --no-launch-browser
   if [[ -n "${GCP_PROJECT}" ]]; then
     gcloud config set project "${GCP_PROJECT}"
   fi
   if ! can_read_gcs; then
-    echo "错误: 登录后仍无法 ls ${GCS_PROBE}" >&2
+    echo "错误: 登录后仍无法 ls ${GCS_BASE}" >&2
     exit 1
   fi
-  echo "[ok] GCS 可读: ${GCS_PROBE}"
+  echo "[ok] GCS 可读: ${GCS_BASE}"
 }
 
 ensure_zstd() {
@@ -532,6 +538,109 @@ check_launch_log() {
     echo "错误: post_check 未通过: ${line}" >&2
     exit 1
   fi
+}
+
+train_log_post_check_ok() {
+  local log_file="$1" line
+  if [[ ! -f "${log_file}" ]]; then
+    return 1
+  fi
+  line="$(grep 'post_check:' "${log_file}" | tail -1 || true)"
+  [[ -n "${line}" ]] || return 1
+  [[ "${line}" == *"video_decode_error=0"* && "${line}" == *"using_zeros=0"* && "${line}" == *"exit=0"* ]]
+}
+
+resolve_train_log() {
+  if [[ -f "${TRAIN_LOG}" ]]; then
+    echo "${TRAIN_LOG}"
+    return 0
+  fi
+  local f
+  for f in "${LOG_DIR}"/*.log; do
+    [[ -f "${f}" ]] || continue
+    grep -q 'WAN_SMOKE=1' "${f}" && continue
+    grep -q 'SMOKE=1' "${f}" && continue
+    if grep -qE 'STEPS=[0-9]+' "${f}"; then
+      echo "${f}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_train_output_dir() {
+  if [[ -n "${TRAIN_OUTPUT_DIR}" ]]; then
+    echo "${TRAIN_OUTPUT_DIR}"
+    return 0
+  fi
+  if [[ -f "${TRAIN_LOG}" ]]; then
+    local line
+    line="$(grep '^OUTPUT_DIR=' "${TRAIN_LOG}" | tail -1 || true)"
+    if [[ -n "${line}" ]]; then
+      echo "${line#OUTPUT_DIR=}"
+      return 0
+    fi
+  fi
+  if [[ -n "${TRAIN_JOB_NAME}" ]]; then
+    echo "${LOG_DIR%/}/${TRAIN_JOB_NAME}"
+    return 0
+  fi
+  if [[ -d "${LOG_DIR}/checkpoints" ]]; then
+    echo "${LOG_DIR}"
+    return 0
+  fi
+  return 1
+}
+
+expected_train_steps() {
+  local train_log="${1:-}"
+  if [[ -n "${STEPS}" ]]; then
+    echo "${STEPS}"
+    return 0
+  fi
+  if [[ -n "${train_log}" && -f "${train_log}" ]]; then
+    local line steps
+    line="$(grep -E 'STEPS=[0-9]+' "${train_log}" | head -1 || true)"
+    if [[ -n "${line}" ]]; then
+      steps="${line##*STEPS=}"
+      steps="${steps%%[[:space:]]*}"
+      if [[ "${steps}" =~ ^[0-9]+$ ]]; then
+        echo "${steps}"
+        return 0
+      fi
+    fi
+  fi
+  echo 10000
+}
+
+train_fully_complete() {
+  local expected_steps output_dir final_ckpt train_log
+  if [[ "${SKIP_TRAIN}" -eq 1 ]]; then
+    return 1
+  fi
+  if ! train_log="$(resolve_train_log)"; then
+    return 1
+  fi
+  if ! train_log_post_check_ok "${train_log}"; then
+    return 1
+  fi
+  if ! grep -q "DATA_REPO_ID=${DATA_REPO_ID}" "${train_log}" \
+    && ! grep -qE "repo_id[=:'\" ]+${DATA_REPO_ID}" "${train_log}"; then
+    return 1
+  fi
+  if [[ -f "${train_log}" ]]; then
+    local line
+    line="$(grep '^OUTPUT_DIR=' "${train_log}" | tail -1 || true)"
+    if [[ -n "${line}" ]]; then
+      TRAIN_OUTPUT_DIR="${line#OUTPUT_DIR=}"
+    fi
+  fi
+  if ! output_dir="$(resolve_train_output_dir)"; then
+    return 1
+  fi
+  expected_steps="$(expected_train_steps "${train_log}")"
+  final_ckpt="${output_dir}/checkpoints/$(printf '%06d' "${expected_steps}")/pretrained_model/model.safetensors"
+  [[ -f "${final_ckpt}" ]]
 }
 
 stage_gcloud() {
@@ -756,7 +865,7 @@ stage_train() {
   local gpu_count="${TRAIN_PROC_PER_NODE:-8}"
   echo_banner "${gpu_count}-GPU 10k (§10)"
   require_file "${LAUNCH_SCRIPT}" "launch"
-  TRAIN_JOB_NAME="${TRAIN_JOB_NAME:-$(date +'%Y_%m_%d_%H_%M_%S')-itvlaGp_p2_8g10k_${DATA_REPO_ID}}"
+  TRAIN_JOB_NAME="${TRAIN_JOB_NAME:-itvlaGp_p2_8g10k_${DATA_REPO_ID}$(date +%y%m%d%H%M)}"
   TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-${LOG_DIR%/}/${TRAIN_JOB_NAME}}"
   local extras=("JOB_NAME=${TRAIN_JOB_NAME}" "OUTPUT_DIR=${TRAIN_OUTPUT_DIR}")
   if [[ -n "${TRAIN_PROC_PER_NODE}" ]]; then
@@ -778,6 +887,64 @@ stage_train() {
   fi
 }
 
+stage_upload() {
+  echo_banner "upload LOG_DIR → GCS"
+  ensure_gcloud_installed
+  ensure_gcloud_login
+
+  if [[ "${SKIP_TRAIN}" -eq 1 ]]; then
+    echo "[skip] --skip-train，跳过上传"
+    return 0
+  fi
+
+  require_dir "${LOG_DIR}" "LOG_DIR"
+
+  local log_basename tar_suffix tar_name tar_path gcs_dst local_size remote_size train_log=""
+  tar_suffix=""
+  if ! train_fully_complete; then
+    tar_suffix="_er"
+    echo "[warn] 训练未完全成功，归档名将带 ${tar_suffix} 后缀"
+    if train_log="$(resolve_train_log 2>/dev/null || true)" && [[ -n "${train_log}" ]]; then
+      echo "       日志: ${train_log}"
+    else
+      echo "       日志: ${TRAIN_LOG}（未找到）"
+    fi
+  fi
+
+  log_basename="$(basename "${LOG_DIR}")"
+  tar_name="${log_basename}${tar_suffix}.tar"
+  tar_path="/tmp/${tar_name}"
+  gcs_dst="${GCS_BASE}${tar_name}"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] tar -cf ${tar_path} -C $(dirname "${LOG_DIR}") ${log_basename}"
+    echo "[dry-run] gcloud storage cp ${tar_path} ${gcs_dst}"
+    echo "[dry-run] 将校验 GCS 对象大小后删除本地 ${tar_path}"
+    return 0
+  fi
+
+  echo "[pack] ${LOG_DIR} → ${tar_path}"
+  tar -cf "${tar_path}" -C "$(dirname "${LOG_DIR}")" "${log_basename}"
+  echo "  归档大小: $(du -h "${tar_path}" | awk '{print $1}')"
+
+  echo "[upload] ${tar_path} → ${gcs_dst}"
+  gcs_cp "${tar_path}" "${gcs_dst}"
+
+  echo "[verify] ${gcs_dst}"
+  if ! remote_size="$(gcloud storage objects describe "${gcs_dst}" --format="value(size)" 2>/dev/null)"; then
+    echo "错误: GCS 上未找到 ${gcs_dst}" >&2
+    exit 1
+  fi
+  local_size="$(stat -c%s "${tar_path}")"
+  if [[ "${remote_size}" != "${local_size}" ]]; then
+    echo "错误: GCS 大小 (${remote_size}) 与本地 (${local_size}) 不一致，保留 ${tar_path}" >&2
+    exit 1
+  fi
+  echo "[ok] GCS 校验通过 (${remote_size} bytes)"
+  rm -f "${tar_path}"
+  echo "[ok] 已上传: ${gcs_dst}"
+}
+
 echo "========== Phase 2 SFT 编排 =========="
 echo "DRY_RUN      : ${DRY_RUN}  FORCE=${FORCE}"
 echo "FROM/UNTIL   : ${FROM_STAGE} → ${UNTIL_STAGE}"
@@ -786,6 +953,7 @@ echo "VENV_ROOT    : ${VENV_ROOT}"
 echo "RUNPKG_ROOT  : ${RUNPKG_ROOT}"
 echo "GCS_PKG      : ${GCS_PKG}"
 echo "GCS_VENV     : ${GCS_VENV}"
+echo "GCS_BASE     : ${GCS_BASE}"
 echo "DATA_REPO_ID : ${DATA_REPO_ID}"
 echo "WARMUP_CKPT  : ${WARMUP_CKPT}"
 echo "WAN_DIR      : ${WAN_DIR}"
@@ -799,7 +967,7 @@ if [[ -n "${TRAIN_PROC_PER_NODE}" ]]; then
 else
   echo "TRAIN_GPUS   : 8 (launch 默认 CUDA_VISIBLE_DEVICES=0-7)"
 fi
-echo "skip         : wan-smoke=${SKIP_WAN_SMOKE} smoke=${SKIP_SMOKE} train=${SKIP_TRAIN}"
+echo "skip         : wan-smoke=${SKIP_WAN_SMOKE} smoke=${SKIP_SMOKE} train=${SKIP_TRAIN} upload=${SKIP_UPLOAD}"
 echo "=============================================="
 if [[ "${HF_HOME}" != "${VENV_ROOT}/"* ]]; then
   echo "警告: HF_HOME 不在 VENV_ROOT 下。手册默认是 ${VENV_ROOT}/var/hf_home；可用 --hf-home 显式指定。" >&2
@@ -811,6 +979,10 @@ fi
 if should_run gcloud; then stage_gcloud; fi
 if should_run runpkg; then stage_runpkg; fi
 if should_run venv; then stage_venv; fi
+
+# 需要激活 venv, 因为里面装了 huggingface-hub
+source ${VENV_ROOT}/bin/activate
+
 if should_run install; then stage_install; fi
 if should_run symlink; then stage_symlink; fi
 if should_run wan; then stage_wan; fi
@@ -830,6 +1002,11 @@ if should_run train; then
   stage_train
 elif [[ "${SKIP_TRAIN}" -eq 1 ]]; then
   echo "[skip] train (--skip-train)"
+fi
+if should_run upload; then
+  stage_upload
+elif [[ "${SKIP_UPLOAD}" -eq 1 ]]; then
+  echo "[skip] upload (--skip-upload)"
 fi
 
 echo "完成（不含评测 §13）。"
