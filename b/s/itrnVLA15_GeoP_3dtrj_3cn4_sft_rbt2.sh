@@ -77,7 +77,7 @@ usage() {
   --runpkg-root PATH        RunPkg 解压根（默认 /tmp/RunPkg）
   --gcs-pkg URI             RunPkg tar.zst GCS 路径
   --gcs-venv URI            venv tar GCS 路径
-  --gcs-base URI            GCS 上传根目录（LOG_DIR 打成 tar 上传；训练异常时文件名加 _er）
+  --gcs-base URI            GCS 上传根目录（LOG_DIR 直接递归上传；训练异常时目录名加 _er）
   --gcp-project ID          可选 gcloud config set project
   --data-repo-id ID         LeRobot repo_id
   --data-dst-rel REL        包内数据相对路径
@@ -102,7 +102,7 @@ usage() {
   --skip-wan-smoke          跳过 WAN Smoke
   --skip-smoke              跳过 Smoke 100
   --skip-train              跳过 8 卡 10k
-  --skip-upload             跳过训练产物打包上传 GCS
+  --skip-upload             跳过训练产物上传 GCS
   --force                   已存在的 RunPkg/venv 也重新下载解压
   --dry-run                 只打印命令
   -h, --help
@@ -449,6 +449,11 @@ ensure_zstd() {
 gcs_cp() {
   local src="$1" dst="$2"
   run gcloud storage cp "${src}" "${dst}"
+}
+
+gcs_cp_recursive() {
+  local src="$1" dst="$2"
+  run gcloud storage cp -r "${src}" "${dst}"
 }
 
 extract_tar_zstd() {
@@ -899,11 +904,11 @@ stage_upload() {
 
   require_dir "${LOG_DIR}" "LOG_DIR"
 
-  local log_basename tar_suffix tar_name tar_path gcs_dst local_size remote_size train_log=""
-  tar_suffix=""
+  local log_basename name_suffix gcs_dst train_log=""
+  name_suffix=""
   if ! train_fully_complete; then
-    tar_suffix="_er"
-    echo "[warn] 训练未完全成功，归档名将带 ${tar_suffix} 后缀"
+    name_suffix="_er"
+    echo "[warn] 训练未完全成功，GCS 目录名将带 ${name_suffix} 后缀"
     if train_log="$(resolve_train_log 2>/dev/null || true)" && [[ -n "${train_log}" ]]; then
       echo "       日志: ${train_log}"
     else
@@ -912,36 +917,23 @@ stage_upload() {
   fi
 
   log_basename="$(basename "${LOG_DIR}")"
-  tar_name="${log_basename}${tar_suffix}.tar"
-  tar_path="/tmp/${tar_name}"
-  gcs_dst="${GCS_BASE}${tar_name}"
+  gcs_dst="${GCS_BASE}${log_basename}${name_suffix}/"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[dry-run] tar -cf ${tar_path} -C $(dirname "${LOG_DIR}") ${log_basename}"
-    echo "[dry-run] gcloud storage cp ${tar_path} ${gcs_dst}"
-    echo "[dry-run] 将校验 GCS 对象大小后删除本地 ${tar_path}"
+    echo "[dry-run] gcloud storage cp -r ${LOG_DIR}/. ${gcs_dst}"
+    echo "[dry-run] 将校验 GCS 前缀非空"
     return 0
   fi
 
-  echo "[pack] ${LOG_DIR} → ${tar_path}"
-  tar -cf "${tar_path}" -C "$(dirname "${LOG_DIR}")" "${log_basename}"
-  echo "  归档大小: $(du -h "${tar_path}" | awk '{print $1}')"
-
-  echo "[upload] ${tar_path} → ${gcs_dst}"
-  gcs_cp "${tar_path}" "${gcs_dst}"
+  echo "[upload] ${LOG_DIR}/ → ${gcs_dst}"
+  echo "  本地大小: $(du -sh "${LOG_DIR}" | awk '{print $1}')"
+  gcs_cp_recursive "${LOG_DIR}/." "${gcs_dst}"
 
   echo "[verify] ${gcs_dst}"
-  if ! remote_size="$(gcloud storage objects describe "${gcs_dst}" --format="value(size)" 2>/dev/null)"; then
-    echo "错误: GCS 上未找到 ${gcs_dst}" >&2
+  if ! gcloud storage ls "${gcs_dst}" 2>/dev/null | head -1 | grep -q .; then
+    echo "错误: GCS 前缀为空或不存在: ${gcs_dst}" >&2
     exit 1
   fi
-  local_size="$(stat -c%s "${tar_path}")"
-  if [[ "${remote_size}" != "${local_size}" ]]; then
-    echo "错误: GCS 大小 (${remote_size}) 与本地 (${local_size}) 不一致，保留 ${tar_path}" >&2
-    exit 1
-  fi
-  echo "[ok] GCS 校验通过 (${remote_size} bytes)"
-  rm -f "${tar_path}"
   echo "[ok] 已上传: ${gcs_dst}"
 }
 
