@@ -99,7 +99,14 @@ NUM_PROCESSES=$((NODE_COUNT * PROC_PER_NODE))
 cd "${PROJ_ROOT}"
 
 JOB_NAME="${JOB_NAME:-$(date +'%Y_%m_%d_%H_%M_%S')-${POLICY}-${JOB_SUFFIX}}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJ_ROOT}/outputs/${POLICY}/${JOB_NAME}}"
+# 正式 10k：若编排脚本已设 LOG_FILE，checkpoint 落到 LOG_DIR（dirname(LOG_FILE)）下。
+if [[ -z "${OUTPUT_DIR:-}" ]]; then
+  if [[ "${WAN_SMOKE}" != "1" && "${SMOKE}" != "1" && -n "${LOG_FILE:-}" ]]; then
+    OUTPUT_DIR="$(dirname "${LOG_FILE}")/${JOB_NAME}"
+  else
+    OUTPUT_DIR="${PROJ_ROOT}/outputs/${POLICY}/${JOB_NAME}"
+  fi
+fi
 LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}.log}"
 mkdir -p "$(dirname "${LOG_FILE}")"
 
@@ -113,6 +120,7 @@ mkdir -p "$(dirname "${LOG_FILE}")"
   echo "DATA_REPO_ID=${DATA_REPO_ID}"
   echo "WARMUP_CKPT=${WARMUP_CKPT}"
   echo "WAN_DIR=${WAN_DIR}"
+  echo "OUTPUT_DIR=${OUTPUT_DIR}"
   echo "WAN_SMOKE=${WAN_SMOKE} SMOKE=${SMOKE} PROC=${NUM_PROCESSES} BS=${BATCH_SIZE} STEPS=${STEPS}"
 } | tee "${LOG_FILE}"
 

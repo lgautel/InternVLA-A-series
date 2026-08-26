@@ -147,7 +147,7 @@ bash b/s/itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.sh
 
 脚本默认 `PROJ_ROOT` 为仓库根；路径与阶段可用环境变量或 `--gcs-pkg` / `--from` / `--until` 等覆盖，见 `bash b/s/itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.sh --help`。
 
-### 1.0 gcloud CLI 检查、安装与登录
+### 1.0 gcloud 与 huggingface-hub 检查、安装与登录
 
 远端 8×H200 VM 上拉 RunPkg / venv 依赖 `gcloud storage cp`。新开的虚机常常 **没有** Google Cloud CLI，或 CLI 在但未登录。
 
@@ -287,12 +287,34 @@ ensure_login
 echo "完成. 下一步: §1.2 下载 RunPkg、§1.3 下载 venv"
 ```
 
+或直接执行**安装命令**
+```bash
+sudo apt-get update -y
+sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
+sudo mkdir -p /usr/share/keyrings
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+sudo apt-get update -y
+sudo apt-get install -y google-cloud-cli
+gcloud auth login --no-launch-browser
+```
+
 登录注意：
 
 - **GCE 虚机已挂服务账号**（metadata 可访问）：`gcloud storage ls` 往往已经成功，脚本会跳过 `auth login`。
 - **裸金属 / 普通 SSH 虚机**：必须走浏览器授权码。不要用 `sudo gcloud auth login`（凭证会写到 root 的配置，普通用户仍无权限）。
 - 可选项目：`export GCP_PROJECT=<project-id>` 后再跑脚本。
 - tarball 安装后若当前 shell 仍找不到 `gcloud`：`source ~/.bashrc` 或 `export PATH="$HOME/google-cloud-sdk/bin:$PATH"`。
+
+
+**HuggingFace 安装与登录**
+```bash
+source /tmp/itnvla15rbt20/bin/activate
+# pip install -U "huggingface_hub[cli]" #如果没有安装
+hf auth login
+```
 
 ### 1.1 GCS 与 GitHub 资产一览
 
@@ -379,6 +401,9 @@ BRANCH=b0728GeoP
 mkdir -p /tmp/SRC
 if [[ ! -d "${PROJ}/.git" ]]; then
   git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git /tmp/SRC/itvlaGp
+  git config --global user.email "you@example.com"
+  git config --global user.name "Your Name"
+  git config pull.rebase false
 else
   cd "${PROJ}"
   git fetch origin
@@ -486,7 +511,7 @@ export KPT_META=${DATA_ROOT}/meta/keypoints_meta.json
 | **Warmup ckpt@400** | `/tmp/RunPkg/Ckp/warmup_hanging_mug_kptsim_400step/checkpoints/000400/pretrained_model` |
 | WAN 权重 | `${HF_HOME}/hub/Wan2.2-TI2V-5B/` |
 | Phase 2 Launch | `launch/internvla_a15_geop_phase2_finetune_kptsim_8g.sh` |
-| 训练输出 | `${PROJ}/outputs/internvla_a1_5/<JOB_NAME>/` |
+| **10k checkpoint** | `${LOG_DIR}/<JOB_NAME>/checkpoints/`（默认 `LOG_DIR=/tmp/hanging_mug_kptsim_lrbv30`） |
 
 > venv 自包含原则、torchcodec 修复、Transformers patch 等 **继承** [wrmup8G §1–§4](itrnVLA15_GeoP_3dtrj_3cn4_wrmup8G.md)，本文不重复展开。
 
@@ -867,10 +892,10 @@ stack_bowls Phase 2 实测（[sft_rbt2LOG §1.5](itrnVLA15_GeoP_3dtrj_3cn4_sft_r
 
 ### 12.2 Checkpoint
 
-正式 run 输出目录示例：
+正式 run 输出目录（编排脚本默认 `LOG_DIR=/tmp/hanging_mug_kptsim_lrbv30`）：
 
 ```
-${PROJ}/outputs/internvla_a1_5/<timestamp>-internvla_a1_5-geop-phase2-finetune-kptsim-voxel-8g-10k/
+${LOG_DIR}/<timestamp>-internvla_a1_5-geop-phase2-finetune-kptsim-voxel-8g-10k/
 ├── checkpoints/
 │   ├── 002500/pretrained_model/
 │   ├── 005000/pretrained_model/
@@ -878,6 +903,12 @@ ${PROJ}/outputs/internvla_a1_5/<timestamp>-internvla_a1_5-geop-phase2-finetune-k
 │   ├── 010000/pretrained_model/
 │   └── last/ -> 010000
 └── wandb/offline-run-*/
+```
+
+同目录还有训练日志 `${LOG_DIR}/8g_10k.log`。查找最新 run：
+
+```bash
+ls -1dt /tmp/hanging_mug_kptsim_lrbv30/*geop-phase2-finetune-kptsim-voxel-8g-10k | head -1
 ```
 
 验证 checkpoint 含 GeoP 配置：
@@ -928,7 +959,7 @@ export HF_HOME=${VENV}/var/hf_home
 export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${VENV}/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="${PROJ}/src:${PROJ}/third_party/RoboTwin:${PYTHONPATH:-}"
 
-CKPT=${PROJ}/outputs/internvla_a1_5/<Phase2_JOB>/checkpoints/002500/pretrained_model
+CKPT=/tmp/hanging_mug_kptsim_lrbv30/<Phase2_JOB>/checkpoints/002500/pretrained_model
 KPT_META=/tmp/RunPkg/Dta/hanging_mug_kptsim_lrbv30/meta/keypoints_meta.json
 OUT=${PROJ}/outputs/robotwin_eval/geop_hanging_mug_kptsim
 

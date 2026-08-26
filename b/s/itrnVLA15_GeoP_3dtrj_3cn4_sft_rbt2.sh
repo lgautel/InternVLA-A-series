@@ -2,7 +2,7 @@
 # =============================================================================
 # itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.sh
 #
-# 远端 8×H200 VM 编排：源码已 clone 后，自动执行 hanging_mug Phase 2 落地手册中
+# 远端 8×H200 VM 编排：源码已 clone 后，自动执行 Phase 2 SFT 落地手册中
 # 除评测以外的全部步骤。
 #
 # 手册: b/d/itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_hngMg.md
@@ -44,9 +44,13 @@ HF_HOME="${HF_HOME:-}"
 HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-}"
 
 EXPECT_GPUS="${EXPECT_GPUS:-8}"
+GPUS="${GPUS:-}"
+CUDA_VISIBLE_DEVICES_TRAIN="${CUDA_VISIBLE_DEVICES_TRAIN:-${CUDA_VISIBLE_DEVICES:-}}"
+EXPECT_GPUS_EXPLICIT=0
+GPUS_EXPLICIT=0
+CUDA_DEVICES_EXPLICIT=0
 BATCH_SIZE="${BATCH_SIZE:-}"
 STEPS="${STEPS:-}"
-LOG_DIR="${LOG_DIR:-/tmp}"
 
 FROM_STAGE="${FROM_STAGE:-gcloud}"
 UNTIL_STAGE="${UNTIL_STAGE:-train}"
@@ -63,7 +67,7 @@ usage() {
   cat <<'EOF'
 用法: itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2.sh [选项]
 
-在源码已 clone 的 VM 上编排 hanging_mug Phase 2（不含评测）。
+在源码已 clone 的 VM 上编排 Phase 2 SFT（不含评测）。
 默认跑完全部阶段，含 8 卡 10k。
 
 路径:
@@ -82,10 +86,12 @@ usage() {
   --launch-script PATH      Phase 2 launch 脚本
   --hf-home PATH            HF_HOME
   --hf-lerobot-home PATH    HF_LEROBOT_HOME
-  --log-dir PATH            日志目录（默认 /tmp）
+  --log-dir PATH            日志目录（默认 /tmp/<DATA_REPO_ID>；正式 10k checkpoint 也写在这里）
 
 训练:
-  --expect-gpus N           Preflight 期望 GPU 数（默认 8）
+  --gpus N                  正式 10k 使用 N 卡（默认 8）；自动设 EXPECT_GPUS、PROC_PER_NODE
+  --cuda-visible-devices L  正式 10k 物理 GPU 列表，如 0,1,2,3,4,5（未设时 --gpus N → 0..N-1）
+  --expect-gpus N           Preflight 期望可见 GPU 数（默认 8；--gpus 会覆盖为同值）
   --batch-size N            仅正式 10k 传给 launch
   --steps N                 仅正式 10k 传给 launch
 
@@ -118,6 +124,64 @@ stage_index() {
   exit 1
 }
 
+count_cuda_devices() {
+  local list="$1"
+  if [[ -z "${list}" ]]; then
+    echo 0
+    return
+  fi
+  local commas="${list//[^,]/}"
+  echo $(( ${#commas} + 1 ))
+}
+
+build_cuda_devices() {
+  local n="$1" i
+  local -a devices=()
+  for ((i = 0; i < n; i++)); do
+    devices+=("$i")
+  done
+  local IFS=,
+  echo "${devices[*]}"
+}
+
+finalize_gpu_config() {
+  local device_count=0
+
+  if [[ "${CUDA_DEVICES_EXPLICIT}" -eq 1 ]]; then
+    device_count="$(count_cuda_devices "${CUDA_VISIBLE_DEVICES_TRAIN}")"
+    if [[ "${device_count}" -lt 1 ]]; then
+      echo "错误: --cuda-visible-devices 无效: ${CUDA_VISIBLE_DEVICES_TRAIN}" >&2
+      exit 1
+    fi
+    if [[ "${GPUS_EXPLICIT}" -eq 1 && "${GPUS}" != "${device_count}" ]]; then
+      echo "错误: --gpus ${GPUS} 与 --cuda-visible-devices 数量 ${device_count} 不一致" >&2
+      exit 1
+    fi
+    GPUS="${device_count}"
+  elif [[ "${GPUS_EXPLICIT}" -eq 1 ]]; then
+    if [[ "${GPUS}" -lt 1 ]]; then
+      echo "错误: --gpus 必须 >= 1，当前: ${GPUS}" >&2
+      exit 1
+    fi
+    CUDA_VISIBLE_DEVICES_TRAIN="$(build_cuda_devices "${GPUS}")"
+    device_count="${GPUS}"
+  else
+    device_count="${EXPECT_GPUS}"
+  fi
+
+  if [[ "${GPUS_EXPLICIT}" -eq 1 || "${CUDA_DEVICES_EXPLICIT}" -eq 1 ]]; then
+    if [[ "${EXPECT_GPUS_EXPLICIT}" -eq 1 && "${EXPECT_GPUS}" != "${GPUS}" ]]; then
+      echo "警告: --expect-gpus ${EXPECT_GPUS} 与训练卡数 ${GPUS} 不一致，以训练卡数为准" >&2
+    fi
+    EXPECT_GPUS="${GPUS}"
+    TRAIN_PROC_PER_NODE="${GPUS}"
+    TRAIN_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_TRAIN}"
+  else
+    TRAIN_PROC_PER_NODE=""
+    TRAIN_CUDA_VISIBLE_DEVICES=""
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --proj-root)          PROJ_ROOT="$2"; shift 2 ;;
@@ -137,7 +201,13 @@ while [[ $# -gt 0 ]]; do
     --hf-home)            HF_HOME="$2"; shift 2 ;;
     --hf-lerobot-home)    HF_LEROBOT_HOME="$2"; shift 2 ;;
     --log-dir)            LOG_DIR="$2"; shift 2 ;;
-    --expect-gpus)        EXPECT_GPUS="$2"; shift 2 ;;
+    --gpus)               GPUS="$2"; GPUS_EXPLICIT=1; shift 2 ;;
+    --cuda-visible-devices)
+      CUDA_VISIBLE_DEVICES_TRAIN="$2"
+      CUDA_DEVICES_EXPLICIT=1
+      shift 2
+      ;;
+    --expect-gpus)        EXPECT_GPUS="$2"; EXPECT_GPUS_EXPLICIT=1; shift 2 ;;
     --batch-size)         BATCH_SIZE="$2"; shift 2 ;;
     --steps)              STEPS="$2"; shift 2 ;;
     --from)               FROM_STAGE="$2"; shift 2 ;;
@@ -155,6 +225,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# 须在 CLI 解析 DATA_REPO_ID / --log-dir 之后，默认日志目录才随任务名变化。
+LOG_DIR="${LOG_DIR:-/tmp/${DATA_REPO_ID}}"
+
+finalize_gpu_config
 
 DATA_DST_REL="${DATA_DST_REL#/}"
 CKPT_DST_REL="${CKPT_DST_REL#/}"
@@ -175,9 +250,11 @@ PYTHON="${VENV_ROOT}/bin/python"
 export PROJ_ROOT VENV_ROOT RUNPKG_ROOT
 export HF_HOME HF_LEROBOT_HOME WAN_DIR WARMUP_CKPT DATA_REPO_ID
 
-WAN_SMOKE_LOG="${LOG_DIR%/}/phase2_hngMg_wan_smoke.log"
-SMOKE_LOG="${LOG_DIR%/}/phase2_hngMg_smoke100.log"
-TRAIN_LOG="${LOG_DIR%/}/phase2_hngMg_8g_10k.log"
+WAN_SMOKE_LOG="${LOG_DIR%/}/wan_smoke.log"
+SMOKE_LOG="${LOG_DIR%/}/smoke100.log"
+TRAIN_LOG="${LOG_DIR%/}/8g_10k.log"
+TRAIN_JOB_NAME="${JOB_NAME:-}"
+TRAIN_OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 FROM_IDX="$(stage_index "${FROM_STAGE}")"
 UNTIL_IDX="$(stage_index "${UNTIL_STAGE}")"
@@ -676,29 +753,32 @@ stage_smoke() {
 }
 
 stage_train() {
-  echo_banner "8-GPU 10k (§10)"
+  local gpu_count="${TRAIN_PROC_PER_NODE:-8}"
+  echo_banner "${gpu_count}-GPU 10k (§10)"
   require_file "${LAUNCH_SCRIPT}" "launch"
-  local extras=()
+  TRAIN_JOB_NAME="${TRAIN_JOB_NAME:-$(date +'%Y_%m_%d_%H_%M_%S')-itvlaGp_p2_8g10k_${DATA_REPO_ID}}"
+  TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-${LOG_DIR%/}/${TRAIN_JOB_NAME}}"
+  local extras=("JOB_NAME=${TRAIN_JOB_NAME}" "OUTPUT_DIR=${TRAIN_OUTPUT_DIR}")
+  if [[ -n "${TRAIN_PROC_PER_NODE}" ]]; then
+    extras+=("PROC_PER_NODE=${TRAIN_PROC_PER_NODE}")
+    extras+=("CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES}")
+  fi
   if [[ -n "${BATCH_SIZE}" ]]; then
     extras+=("BATCH_SIZE=${BATCH_SIZE}")
   fi
   if [[ -n "${STEPS}" ]]; then
     extras+=("STEPS=${STEPS}")
   fi
-  if [[ ${#extras[@]} -gt 0 ]]; then
-    run_launch "${TRAIN_LOG}" "${extras[@]}"
-  else
-    run_launch "${TRAIN_LOG}"
-  fi
+  run_launch "${TRAIN_LOG}" "${extras[@]}"
   check_launch_log "${TRAIN_LOG}"
   echo "[ok] 训练日志: ${TRAIN_LOG}"
-  echo "     checkpoint 目录: ${PROJ_ROOT}/outputs/internvla_a1_5/"
+  echo "     checkpoint 目录: ${TRAIN_OUTPUT_DIR}"
   if [[ "${DRY_RUN}" -eq 0 ]]; then
-    ls -1dt "${PROJ_ROOT}/outputs/internvla_a1_5/"* 2>/dev/null | head -5 || true
+    ls -1dt "${TRAIN_OUTPUT_DIR}/checkpoints/"* 2>/dev/null | head -5 || true
   fi
 }
 
-echo "========== hanging_mug Phase 2 编排 =========="
+echo "========== Phase 2 SFT 编排 =========="
 echo "DRY_RUN      : ${DRY_RUN}  FORCE=${FORCE}"
 echo "FROM/UNTIL   : ${FROM_STAGE} → ${UNTIL_STAGE}"
 echo "PROJ_ROOT    : ${PROJ_ROOT}"
@@ -712,7 +792,13 @@ echo "WAN_DIR      : ${WAN_DIR}"
 echo "LAUNCH       : ${LAUNCH_SCRIPT}"
 echo "HF_HOME      : ${HF_HOME}"
 echo "HF_LEROBOT   : ${HF_LEROBOT_HOME}"
+echo "LOG_DIR      : ${LOG_DIR}"
 echo "EXPECT_GPUS  : ${EXPECT_GPUS}"
+if [[ -n "${TRAIN_PROC_PER_NODE}" ]]; then
+  echo "TRAIN_GPUS   : ${TRAIN_PROC_PER_NODE} (CUDA_VISIBLE_DEVICES=${TRAIN_CUDA_VISIBLE_DEVICES})"
+else
+  echo "TRAIN_GPUS   : 8 (launch 默认 CUDA_VISIBLE_DEVICES=0-7)"
+fi
 echo "skip         : wan-smoke=${SKIP_WAN_SMOKE} smoke=${SKIP_SMOKE} train=${SKIP_TRAIN}"
 echo "=============================================="
 if [[ "${HF_HOME}" != "${VENV_ROOT}/"* ]]; then
