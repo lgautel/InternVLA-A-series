@@ -435,14 +435,19 @@ check_launch_log() {
     echo "错误: 日志不存在 ${log_file}" >&2
     exit 1
   fi
-  if ! grep -q "DATA_REPO_ID=${DATA_REPO_ID}" "${log_file}"; then
-    echo "错误: 日志未包含 DATA_REPO_ID=${DATA_REPO_ID}" >&2
+  # launch 头信息是 DATA_REPO_ID=...；accelerate 配置 dump 是 'repo_id': '...'。
+  # 旧版 launch 只 tee 了 accelerate 输出，头信息/post_check 不会进 LOG_FILE。
+  if ! grep -q "DATA_REPO_ID=${DATA_REPO_ID}" "${log_file}" \
+    && ! grep -qE "repo_id[=:'\" ]+${DATA_REPO_ID}" "${log_file}"; then
+    echo "错误: 日志未包含 DATA_REPO_ID=${DATA_REPO_ID}（也无 repo_id=${DATA_REPO_ID}）" >&2
+    echo "      日志: ${log_file}" >&2
     exit 1
   fi
   local line
   line="$(grep 'post_check:' "${log_file}" | tail -1 || true)"
   if [[ -z "${line}" ]]; then
     echo "错误: 日志无 post_check 行: ${log_file}" >&2
+    echo "      旧版 launch 把 post_check 只打到终端；请用已修复的 launch 重跑该阶段。" >&2
     exit 1
   fi
   echo "  ${line}"

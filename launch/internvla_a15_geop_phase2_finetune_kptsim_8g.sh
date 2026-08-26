@@ -101,15 +101,20 @@ cd "${PROJ_ROOT}"
 JOB_NAME="${JOB_NAME:-$(date +'%Y_%m_%d_%H_%M_%S')-${POLICY}-${JOB_SUFFIX}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJ_ROOT}/outputs/${POLICY}/${JOB_NAME}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_DIR}.log}"
+mkdir -p "$(dirname "${LOG_FILE}")"
 
-echo "VENV_ROOT=${VENV_ROOT}"
-echo "PROJ_ROOT=${PROJ_ROOT}"
-echo "HF_HOME=${HF_HOME}"
-echo "HF_LEROBOT_HOME=${HF_LEROBOT_HOME}"
-echo "DATA_REPO_ID=${DATA_REPO_ID}"
-echo "WARMUP_CKPT=${WARMUP_CKPT}"
-echo "WAN_DIR=${WAN_DIR}"
-echo "WAN_SMOKE=${WAN_SMOKE} SMOKE=${SMOKE} PROC=${NUM_PROCESSES} BS=${BATCH_SIZE} STEPS=${STEPS}"
+# 头信息必须进 LOG_FILE：后面的 accelerate|tee 会覆盖该文件，因此先写入再 tee -a。
+# 编排脚本 check_launch_log() 会 grep DATA_REPO_ID= 与 post_check:。
+{
+  echo "VENV_ROOT=${VENV_ROOT}"
+  echo "PROJ_ROOT=${PROJ_ROOT}"
+  echo "HF_HOME=${HF_HOME}"
+  echo "HF_LEROBOT_HOME=${HF_LEROBOT_HOME}"
+  echo "DATA_REPO_ID=${DATA_REPO_ID}"
+  echo "WARMUP_CKPT=${WARMUP_CKPT}"
+  echo "WAN_DIR=${WAN_DIR}"
+  echo "WAN_SMOKE=${WAN_SMOKE} SMOKE=${SMOKE} PROC=${NUM_PROCESSES} BS=${BATCH_SIZE} STEPS=${STEPS}"
+} | tee "${LOG_FILE}"
 
 LAUNCH_ARGS=()
 if [[ "${NUM_PROCESSES}" -gt 1 ]]; then
@@ -186,14 +191,16 @@ ARGS=(
   --wandb.mode=offline
 )
 
-mkdir -p "$(dirname "${LOG_FILE}")"
 set -o pipefail
-"${PYTHON}" -m accelerate.commands.launch "${ARGS[@]}" 2>&1 | tee "${LOG_FILE}"
+set +e
+"${PYTHON}" -m accelerate.commands.launch "${ARGS[@]}" 2>&1 | tee -a "${LOG_FILE}"
 train_exit=${PIPESTATUS[0]}
+set -e
 
 decode_err=$(grep -c '\[video_decode_error\]' "${LOG_FILE}" || true)
 zero_frames=$(grep -c 'using_zeros' "${LOG_FILE}" || true)
-echo "post_check: video_decode_error=${decode_err} using_zeros=${zero_frames} exit=${train_exit}"
+# set -e + pipefail 时 accelerate 非 0 会在此处之前就退出；上面 set +e 保证 post_check 一定落盘。
+echo "post_check: video_decode_error=${decode_err} using_zeros=${zero_frames} exit=${train_exit}" | tee -a "${LOG_FILE}"
 if [[ "${decode_err}" -ne 0 || "${zero_frames}" -ne 0 ]]; then
   echo "WARNING: video decode failures — see wrmup8G.md Appendix A" >&2
 fi
