@@ -188,4 +188,4 @@ third_party/
 export_internvla_a15_checkpoint.py
 ckpt/
 ckpts/
-outputs-ext
+outputs-*

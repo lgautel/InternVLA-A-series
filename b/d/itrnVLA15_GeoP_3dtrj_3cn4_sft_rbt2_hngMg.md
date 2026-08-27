@@ -403,7 +403,7 @@ if [[ ! -d "${PROJ}/.git" ]]; then
   git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git /tmp/SRC/itvlaGp
   git config --global user.email "you@example.com"
   git config --global user.name "Your Name"
-  git config pull.rebase false
+  git config --global pull.rebase false
 else
   cd "${PROJ}"
   git fetch origin
