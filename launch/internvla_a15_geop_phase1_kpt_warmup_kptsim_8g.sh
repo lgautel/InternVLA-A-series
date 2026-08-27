@@ -62,7 +62,7 @@ NODE_RANK="${NODE_RANK:-0}"
 NUM_PROCESSES=$((NODE_COUNT * PROC_PER_NODE))
 
 POLICY="internvla_a1_5"
-DATA_REPO_ID="stack_bowls_three_kptsim_lrbv30"
+DATA_REPO_ID="${DATA_REPO_ID:-stack_bowls_three_kptsim_lrbv30}"
 NORM_STATS="${NORM_STATS:-${HF_LEROBOT_HOME}/${DATA_REPO_ID}/norm_stat.json}"
 PRETRAINED_PATH="${PRETRAINED_PATH:-${HF_HOME}/ckpts/InternVLA-A1.5-base}"
 GEOPREDICT_CKPT="${GEOPREDICT_CKPT:-${HF_HOME}/ckpts/GeoPredict_robocasa.pth}"
@@ -77,6 +77,8 @@ echo "VENV_ROOT=${VENV_ROOT}"
 echo "PROJ_ROOT=${PROJ_ROOT}"
 echo "HF_HOME=${HF_HOME}"
 echo "HF_LEROBOT_HOME=${HF_LEROBOT_HOME}"
+echo "DATA_REPO_ID=${DATA_REPO_ID}"
+echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "SMOKE=${SMOKE} PROC=${NUM_PROCESSES} BS=${BATCH_SIZE} STEPS=${STEPS}"
 
 LAUNCH_ARGS=()

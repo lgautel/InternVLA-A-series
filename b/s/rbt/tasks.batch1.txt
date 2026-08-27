@@ -1,0 +1,4 @@
+# First batch of RoboTwin 2.0 tasks for run_each_rbt_p012.
+# Source dirs live under CLEAN_ROOT (default /home/a26113/Dta/RoboTwin-Clean).
+place_bread_skillet
+pick_dual_bottles

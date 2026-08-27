@@ -1,0 +1,5 @@
+# Example list. First production batch is tasks.batch1.txt.
+# hang_mug
+# scan_object
+place_bread_skillet
+pick_dual_bottles
