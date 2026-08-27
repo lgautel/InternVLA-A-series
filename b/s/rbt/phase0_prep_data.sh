@@ -112,8 +112,22 @@ if [[ "${FORCE}" == "1" ]] || ! v30_ready; then
       --push-to-hub=false \
       --force-conversion >> "${LOG}" 2>&1
     [[ -d "${CONVERT_OUT}" ]] || rbt_die "转换未产出 ${CONVERT_OUT}"
-    rbt_mkdir "${TASK_V30}"
-    rsync -a --delete "${CONVERT_OUT}/" "${TASK_V30}/"
+    if command -v rsync >/dev/null 2>&1; then
+      rbt_mkdir "${TASK_V30}"
+      rsync -a --delete "${CONVERT_OUT}/" "${TASK_V30}/"
+    else
+      rbt_log "警告: 未找到 rsync, 使用 Python shutil.copytree 同步 v3.0"
+      "${TRAIN_PYTHON}" - "${CONVERT_OUT}" "${TASK_V30}" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+source, dest = map(Path, sys.argv[1:3])
+if dest.exists():
+    shutil.rmtree(dest)
+shutil.copytree(source, dest, symlinks=True)
+PY
+    fi
     rbt_mkdir "${TASK_V30}/meta"
     cp -f "${TASK_LRB}/meta/keypoints_meta.json" "${TASK_V30}/meta/keypoints_meta.json"
     cp -f "${TASK_LRB}/norm_stat.json" "${TASK_V30}/norm_stat.json"
@@ -121,6 +135,12 @@ if [[ "${FORCE}" == "1" ]] || ! v30_ready; then
   fi
 else
   rbt_log "复用已有 v3.0: ${TASK_V30}"
+fi
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+  write_state "phase0" "dry_run" "{\"v30\":\"${TASK_V30}\",\"repo_id\":\"${TASK_REPO_ID}\"}"
+  rbt_log "Phase0 dry-run 完成: 未创建数据产物"
+  exit 0
 fi
 
 v30_ready || rbt_die "Phase0 结束后 v3.0 仍不完整: ${TASK_V30}"

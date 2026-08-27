@@ -14,12 +14,23 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
 
-v30_ready || rbt_die "Phase2 需要完整 v3.0 数据: ${TASK_V30}"
-ensure_lerobot_home_link
+if [[ "${DRY_RUN}" != "1" ]]; then
+  v30_ready || rbt_die "Phase2 需要完整 v3.0 数据: ${TASK_V30}"
+  ensure_lerobot_home_link
+else
+  rbt_log "DRY-RUN: 跳过 v3.0 完整性检查和 LeRobot symlink"
+fi
 
 WARMUP_CKPT="${WARMUP_CKPT:-$(warmup_ckpt_path)}"
-[[ -n "${WARMUP_CKPT}" ]] || rbt_die "找不到 warmup ckpt@400, 请先跑 Phase1"
-[[ -d "${WARMUP_CKPT}" ]] || rbt_die "warmup ckpt 目录不存在: ${WARMUP_CKPT}"
+if [[ "${DRY_RUN}" == "1" ]]; then
+  if [[ -z "${WARMUP_CKPT}" ]]; then
+    WARMUP_CKPT="${TASK_WARMUP_DIR}/<pending-ckpt-400>"
+    rbt_log "DRY-RUN: 尚无 warmup ckpt@400, 使用占位路径 ${WARMUP_CKPT}"
+  fi
+else
+  [[ -n "${WARMUP_CKPT}" ]] || rbt_die "找不到 warmup ckpt@400, 请先跑 Phase1"
+  [[ -d "${WARMUP_CKPT}" ]] || rbt_die "warmup ckpt 目录不存在: ${WARMUP_CKPT}"
+fi
 
 if [[ "${SKIP_EXISTING}" == "1" && "${FORCE}" != "1" && -L "${TASK_SFT_LATEST}" ]]; then
   rbt_log "跳过 Phase2: 已有 sft/latest -> $(readlink -f "${TASK_SFT_LATEST}" || true)"
@@ -28,10 +39,15 @@ if [[ "${SKIP_EXISTING}" == "1" && "${FORCE}" != "1" && -L "${TASK_SFT_LATEST}" 
 fi
 
 SFT_EPOCHS="${SFT_EPOCHS:-76}"
+SFT_INFO="${TASK_V30}/meta/info.json"
+if [[ "${DRY_RUN}" == "1" && ! -f "${SFT_INFO}" ]]; then
+  SFT_INFO="${TASK_SRC}/meta/info.json"
+  rbt_log "DRY-RUN: v3.0 info.json 尚不存在，使用源任务 info.json 估算 SFT schedule"
+fi
 
 eval "$(
   "${TRAIN_PYTHON}" "${SCRIPT_DIR}/compute_sft_steps.py" \
-    --info "${TASK_V30}/meta/info.json" \
+    --info "${SFT_INFO}" \
     --epochs "${SFT_EPOCHS}" \
     --n-gpus "${PROC_PER_NODE}" \
     --batch-size "${BATCH_SIZE}" \

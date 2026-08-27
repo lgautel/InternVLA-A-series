@@ -13,8 +13,12 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
 
-v30_ready || rbt_die "Phase1 需要完整 v3.0 数据: ${TASK_V30}"
-ensure_lerobot_home_link
+if [[ "${DRY_RUN}" != "1" ]]; then
+  v30_ready || rbt_die "Phase1 需要完整 v3.0 数据: ${TASK_V30}"
+  ensure_lerobot_home_link
+else
+  rbt_log "DRY-RUN: 跳过 v3.0 完整性检查和 LeRobot symlink"
+fi
 WARMUP_STEPS="${WARMUP_STEPS:-400}"
 
 EXISTING_CKPT="$(warmup_ckpt_path)"

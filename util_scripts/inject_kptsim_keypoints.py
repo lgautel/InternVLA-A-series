@@ -65,8 +65,12 @@ def _copy_dataset(source: Path, dest: Path, force: bool) -> None:
                 f"Destination {dest} already exists. Pass --force to overwrite, or pick a new --dest."
             )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Copying dataset %s -> %s (rsync -a) ...", source, dest)
-    subprocess.run(["rsync", "-a", f"{source}/", f"{dest}/"], check=True)
+    if shutil.which("rsync"):
+        logger.info("Copying dataset %s -> %s (rsync -a) ...", source, dest)
+        subprocess.run(["rsync", "-a", f"{source}/", f"{dest}/"], check=True)
+    else:
+        logger.warning("rsync not found; falling back to shutil.copytree for %s -> %s", source, dest)
+        shutil.copytree(source, dest, symlinks=True)
 
 
 def _load_kptsim_meta(kptsim_dir: Path) -> dict:

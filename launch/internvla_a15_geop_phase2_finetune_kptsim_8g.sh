@@ -146,7 +146,9 @@ ARGS=(
   --policy.repo_id=lerobot_lab/"${POLICY}"
   --policy.push_to_hub=false
   --policy.pretrained_path="${WARMUP_CKPT}"
-  --policy.gradient_checkpointing=false
+  # A800 80G 上 Phase 2 同时训练 VLM 与 experts；启用 activation
+  # checkpointing 保持每卡 batch=16 和有效 batch=128，避免首步 OOM。
+  --policy.gradient_checkpointing=true
   --policy.dtype=bfloat16
   --policy.optimizer_lr=5e-5
   --policy.scheduler_warmup_steps="${SCHEDULER_WARMUP}"
@@ -167,6 +169,7 @@ ARGS=(
   --policy.wan_checkpoint_path="${WAN_DIR}"
   --policy.wan_config_path="${WAN_DIR}"
   --policy.vae_path="${WAN_DIR}/Wan2.2_VAE.pth"
+  --policy.video_micro_batch_size="${VIDEO_MICRO_BATCH_SIZE:-1}"
   --policy.enable_keypoint_predictor=true
   --policy.num_keypoint_joints=14
   --policy.action_loss_weight=10.0

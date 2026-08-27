@@ -427,6 +427,9 @@ class InternVLAA15Config(PreTrainedConfig):
     num_video_frames: int = 4
     video_height: int = 224
     video_width: int = 224
+    # Chunk WAN VAE/DiT video supervision to fit 80 GiB GPUs without changing
+    # the optimizer batch size or the number of training samples per step.
+    video_micro_batch_size: int = 1
     video_loss_weight: float = 1.0
     video_loss_only: bool = False
     action_loss_only: bool = False

@@ -2060,13 +2060,28 @@ class InternVLAA15(nn.Module):
         wan_context = self.learnable_to_wan_proj(learnable_out)
         wan_context = wan_context.to(dtype=wan_dtype, device=wan_device)
 
-        # Encode video with frozen VAE: expects [B, C, T, H, W]
+        # Encode video with frozen VAE: expects [B, C, T, H, W].  The VAE
+        # activation peak is large even under no_grad, so process micro-batches
+        # independently while keeping the optimizer batch unchanged.
         video_bcthw = video_frames.permute(0, 2, 1, 3, 4).to(dtype=wan_dtype, device=wan_device)
         first_frame_bcthw = video_bcthw[:, :, 0:1]
+        micro_batch_size = max(1, int(self.config.video_micro_batch_size))
 
         with torch.no_grad():
-            clean_latent = self.wan_video_model.encode_video(video_bcthw)
-            cond_latent = self.wan_video_model.encode_video(first_frame_bcthw)
+            clean_latent = torch.cat(
+                [
+                    self.wan_video_model.encode_video(video_bcthw[start : start + micro_batch_size])
+                    for start in range(0, B, micro_batch_size)
+                ],
+                dim=0,
+            )
+            cond_latent = torch.cat(
+                [
+                    self.wan_video_model.encode_video(first_frame_bcthw[start : start + micro_batch_size])
+                    for start in range(0, B, micro_batch_size)
+                ],
+                dim=0,
+            )
 
         # Sample video flow-matching timestep
         timestep_id = torch.randint(
@@ -2088,10 +2103,19 @@ class InternVLAA15(nn.Module):
         video_target = video_noise - clean_latent
         video_target[:, :, 0:1] = 0
 
-        # WAN forward
+        # WAN forward, chunked for the same memory reason as the VAE above.
         with torch.amp.autocast("cuda", dtype=wan_dtype):
-            video_pred = self.wan_dit_forward(noisy_latent, wan_context, video_t)
-
+            video_pred = torch.cat(
+                [
+                    self.wan_dit_forward(
+                        noisy_latent[start : start + micro_batch_size],
+                        wan_context[start : start + micro_batch_size],
+                        video_t[start : start + micro_batch_size],
+                    )
+                    for start in range(0, B, micro_batch_size)
+                ],
+                dim=0,
+            )
         video_pred[:, :, 0:1] = 0
         return F.mse_loss(video_pred.float(), video_target.float(), reduction="mean")
 

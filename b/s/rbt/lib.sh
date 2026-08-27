@@ -155,6 +155,13 @@ _is_pretrained_dir() {
 }
 
 warmup_ckpt_path() {
+  if [[ -n "${LOCAL_WARMUP_CKPT_ROOT:-}" ]]; then
+    local local_p="${LOCAL_WARMUP_CKPT_ROOT}/${TASK_NAME}-000400"
+    if _is_pretrained_dir "${local_p}"; then
+      echo "${local_p}"
+      return 0
+    fi
+  fi
   local p="${TASK_WARMUP_LATEST}/checkpoints/000400/pretrained_model"
   if _is_pretrained_dir "${p}"; then
     echo "${p}"
