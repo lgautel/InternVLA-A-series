@@ -10,9 +10,17 @@ set -euo pipefail
 #   - InternVLA-A1.5-base: ${HF_HOME}/ckpts/InternVLA-A1.5-base
 #   - dataset repo_id: robotwin/hanging_mug  (must be LeRobot v3.0)
 #
-# Training knobs follow the stack_bowls_three run that actually completed:
-#   8 GPUs, per-GPU batch_size=16 (32 OOM with WAN + 3 cameras), steps=10000,
-#   dist_loading=false, freeze_learnable_tokens=true, action_loss_only=false.
+# This host has 6x H200. Defaults (all overridable via env):
+#   STEPS=12500  BATCH_SIZE=16  SAVE_FREQ=2500  LOG_FREQ=50
+#   CUDA_VISIBLE_DEVICES / PROC_PER_NODE  auto-detect nvidia-smi if unset
+#   MASTER_PORT=36111  DIST_LOADING=false
+#   freeze_learnable_tokens=true, action_loss_only=false
+#   per-GPU batch_size=16 (32 OOM with WAN + 3 cameras on H200)
+#
+# Override example:
+#   STEPS=12500 BATCH_SIZE=16 PROC_PER_NODE=6 \
+#     CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
+#     bash launch/internvla_a15_finetune_robotwin_hngMg_venv.sh
 #
 # See b/d/p/reprd_rbtwn_hngMg.md for full context.
 ###############################################################################
@@ -50,8 +58,21 @@ echo "MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
 # potential hangs in PyTorch 2.10's libuv implementation.
 export USE_LIBUV=${USE_LIBUV:-0}
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-PROC_PER_NODE="${PROC_PER_NODE:-8}"
+# Detect visible GPUs. This host is 6x H200; do not default to 8.
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    _ngpu="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ -z "${_ngpu}" || "${_ngpu}" -lt 1 ]]; then
+        echo "ERROR: nvidia-smi reported no GPUs and CUDA_VISIBLE_DEVICES is unset." >&2
+        exit 1
+    fi
+    export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((_ngpu - 1)))"
+    PROC_PER_NODE="${PROC_PER_NODE:-${_ngpu}}"
+else
+    _ngpu="$(awk -F, '{print NF}' <<< "${CUDA_VISIBLE_DEVICES}")"
+    PROC_PER_NODE="${PROC_PER_NODE:-${_ngpu}}"
+fi
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} PROC_PER_NODE=${PROC_PER_NODE}"
+
 NODE_COUNT="${NODE_COUNT:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 NUM_PROCESSES=$((NODE_COUNT * PROC_PER_NODE))
@@ -99,18 +120,54 @@ PRETRAINED_DETAIL="a15_base"
 JOB_NAME="${JOB_NAME:-$(date +'%Y_%m_%d_%H_%M_%S')-${POLICY}-robotwin-hanging_mug-${ACTION_TYPE}-${PRETRAINED_DETAIL}-finetune}"
 OUTPUT_DIR="${BASE_OUTPUT_DIR}/${JOB_NAME}"
 
-# Same knobs as the successful stack_bowls_three 10k run: 8 GPU, bs=16,
-# SAVE_FREQ=2500 -> checkpoints at 2.5k/5k/7.5k/10k.
-STEPS="${STEPS:-10000}"
+# 6 GPU, bs=16 (effective 96). STEPS is overridable; default 12500.
+# SAVE_FREQ=2500 -> checkpoints at 2.5k/5k/7.5k/10k/12.5k.
+STEPS="${STEPS:-12500}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 SAVE_FREQ="${SAVE_FREQ:-2500}"
 LOG_FREQ="${LOG_FREQ:-50}"
 
-# dist_loading=false is safer for this 50-episode dataset on 8 ranks.
+# dist_loading=false is safer for this 50-episode dataset on few ranks.
 DIST_LOADING="${DIST_LOADING:-false}"
 
 echo "STEPS=${STEPS} BATCH_SIZE=${BATCH_SIZE} PROC_PER_NODE=${PROC_PER_NODE} DIST_LOADING=${DIST_LOADING}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
+
+############################## Path preflight #################################
+
+_fail=0
+_need_file() {
+    local p="$1" label="$2"
+    if [[ ! -e "${p}" ]]; then
+        echo "ERROR: missing ${label}: ${p}" >&2
+        _fail=1
+    fi
+}
+
+_need_file "${PRETRAINED_PATH}/model.safetensors" "InternVLA-A1.5-base weights"
+_need_file "${WAN_VAE_PATH}" "WAN VAE"
+_need_file "${WAN_CHECKPOINT_PATH}/config.json" "WAN config"
+_need_file "${EXTERNAL_STATS_PATH}" "external abs stats"
+
+DATASET_INFO="${HF_LEROBOT_HOME}/${DATASET_REPO_ID}/meta/info.json"
+if [[ ! -f "${DATASET_INFO}" ]]; then
+    echo "ERROR: missing dataset info.json: ${DATASET_INFO}" >&2
+    echo "  Convert hanging_mug to LeRobot v3.0 and symlink it to ${HF_LEROBOT_HOME}/${DATASET_REPO_ID}" >&2
+    _fail=1
+else
+    _ver="$("${VENV_ROOT}/bin/python" -c "import json; print(json.load(open('${DATASET_INFO}')).get('codebase_version',''))")"
+    if [[ "${_ver}" != "v3.0" ]]; then
+        echo "ERROR: ${DATASET_INFO} codebase_version=${_ver} (need v3.0)" >&2
+        _fail=1
+    else
+        echo "dataset codebase_version=${_ver} at ${DATASET_INFO}"
+    fi
+fi
+
+if [[ "${_fail}" -ne 0 ]]; then
+    echo "Preflight failed. Fix the paths above before launching training." >&2
+    exit 1
+fi
 
 ARGS=(
     # ---- Accelerate / distributed ----

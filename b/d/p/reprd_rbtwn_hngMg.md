@@ -4,7 +4,7 @@
 >
 > 本手册对照 [reprd_rbtwn_stackb3.md](reprd_rbtwn_stackb3.md) 的流程与超参，按**当前机器**的路径重写。数据源是用户指定的 [`/tmp/RunPkg/Dta/RoboTwin-Clean/hanging_mug/`](/tmp/RunPkg/Dta/RoboTwin-Clean/hanging_mug/)（LeRobot **v2.1**），训练前必须转换成 **v3.0**。
 >
-> 本手册分两部分：**Part A 是可执行的分步操作手册**（先写后执行）；**Part B 是执行记录**——按时间顺序记录所有实际执行的操作、遇到的每一个报错的根因分析与修复方式、以及全部新增/修改/删除文件清单，最后给出最终结果。
+> 本手册分两部分：**Part A 是可执行的分步操作手册**；**Part B 保留 Session 1 摘要**。本机（6×H200 / 12500 步）的实际执行记录见 [reprd_rbtwn_hngMgLOG.md](reprd_rbtwn_hngMgLOG.md) **Session 2**。
 
 ---
 
@@ -36,15 +36,15 @@
 
 3. **动作模式**：使用 **abs**（绝对关节位置），与官方 [`launch/internvla_a15_finetune_robotwin.sh`](../../launch/internvla_a15_finetune_robotwin.sh) 及 stack_bowls_three 微调一致。
 
-4. **训练配置**：沿用 stack_bowls_three **实际跑通**的 knobs（不是官方脚本默认的 2 GPU / 60k steps）：
-   - 8 GPU 全开
+4. **训练配置**：沿用 stack_bowls_three **实际跑通**的 knobs（不是官方脚本默认的 2 GPU / 60k steps），并按**本机 6×H200** 调整：
+   - 6 GPU 全开（`CUDA_VISIBLE_DEVICES` / `PROC_PER_NODE` 未设置时由 `nvidia-smi` 自动探测）
    - per-GPU `batch_size=16`（32 在 WAN video loss + 三相机下已验证 OOM）
-   - `steps=10000`，`save_freq=2500`
+   - `steps=12500`（环境变量 `STEPS` 可覆盖），`save_freq=2500`
    - `action_loss_only=false`（启用 WAN video loss）
    - `freeze_learnable_tokens=true`
-   - `dist_loading=false`（50 episode 小数据集，避免 8 卡分片过稀）
+   - `dist_loading=false`（50 episode 小数据集，避免少卡分片过稀）
 
-5. **数据规模**（已实测 parquet）：50 episodes，16889 frames，fps=15。episode 长度 min/median/max = **325 / 335 / 373**，全部 ≥ `chunk_size=50`，计算 stats 时不会跳过 episode。effective batch size=128（16×8）时，每个 epoch ≈ **132** steps，10k steps ≈ **76** epochs。
+5. **数据规模**（已实测 parquet）：50 episodes，16889 frames，fps=15。episode 长度 min/median/max = **325 / 335 / 373**，全部 ≥ `chunk_size=50`，计算 stats 时不会跳过 episode。effective batch size=96（16×6）时，每个 epoch ≈ **176** steps，12500 steps ≈ **71** epochs。
 
 6. **Venv**：所有操作在 `/tmp/itnvla15rbt20/` 中执行，**不用 conda**。该环境已安装 torch 2.10.0+cu128、transformers 5.2.0、torchcodec 0.10.0、flash-attn 2.8.3。
 
@@ -52,12 +52,18 @@
 
 8. **评测**：`evaluation/RoboTwin/eval.sh`，`task_idx=10`，`ACTION_MODE=abs`，`INFER_HORIZON=50`。当前 `eval.sh` **只吃 4 个位置参数**（checkpoint / output / task_config / task_idx），动作模式与 horizon 必须用环境变量传入；README / stack_bowls_three 手册里多写的 `abs 50` 位置参数会被忽略。
 
-9. **机器规格**（本机已核对）：8×NVIDIA H200（约 143GB），当前全部空闲。单卡足以容纳 base + WAN 及 bs=16 的训练中间状态。
+9. **机器规格**（本机已核对）：**6×NVIDIA H200**（约 143GB），不是 8 卡。单卡足以容纳 base + WAN 及 bs=16 的训练中间状态。上一轮 8 卡 10k 的产物不在本机，不能 resume。
 
-10. **不要用错数据目录**：
+10. **本机启动前必须现做的路径**（不要当成已经存在）：
+    - `/tmp/RunPkg/Dta/RoboTwin-Clean-v30/`（v2.1 副本 + v3.0 产物）
+    - 仓库根 `data` symlink、`${HF_LEROBOT_HOME}/robotwin/hanging_mug`
+    - `${HF_HOME}/lerobot/stats/aloha/abs/agg_1repos_4eb657cb6a/stats.json`
+    以上都要按 §2 现做。启动脚本会预检这些路径，缺则直接退出。
+
+11. **不要用错数据目录**：
     - 训练用：从 Clean `hanging_mug` 转换得到的 **v3.0**（见 §2）。
     - 不要把整个 `/tmp/RunPkg/Dta/RoboTwin-Clean/` 当训练集（其余约 50 个任务仍是 v2.1）。
-    - `/tmp/RunPkg/Dta/hanging_mug_kptsim_lrbv30/` 已是 v3.0，且 action 与 Clean `hanging_mug` 数值一致，但带 `keypoints_meta.json`、视频封装不同。本手册按用户指定的 Clean 源走正式转换，不把 kptsim 当作默认训练数据。
+    - `/tmp/RunPkg/Dta/hanging_mug_kptsim_lrbv30/` **本机不存在**；即使在其它机器上它已是 v3.0，也不把它当作默认训练数据。本手册按用户指定的 Clean 源走正式转换。
 
 ---
 
@@ -75,7 +81,7 @@
 | Wan2.2-TI2V-5B | `${HF_HOME}/hub/Wan2.2-TI2V-5B/`（含 `Wan2.2_VAE.pth`） |
 | Qwen3.5-2B | HF hub 缓存 `models--Qwen--Qwen3.5-2B`（`VLM_MODEL_PATH=Qwen/Qwen3.5-2B`） |
 | 源数据（v2.1，只读） | `/tmp/RunPkg/Dta/RoboTwin-Clean/hanging_mug/` |
-| 训练数据（v3.0，转换后） | `/tmp/RunPkg/Dta/RoboTwin-Clean-v30/hanging_mug_v30/` |
+| 训练数据（v3.0，转换后；**须按 §2 现做**） | `/tmp/RunPkg/Dta/RoboTwin-Clean-v30/hanging_mug_v30/` |
 | 启动脚本 | `launch/internvla_a15_finetune_robotwin_hngMg_venv.sh` |
 
 每次新 shell 先执行：
@@ -119,7 +125,7 @@ torch: 2.10.0+cu128 | CUDA: 12.8
 transformers: 5.2.0
 torchcodec: 0.10.0+cu128
 flash_attn: 2.8.3
-GPU count: 8
+GPU count: 6
   GPU0: NVIDIA H200 (140GB)
   ...
 ```
@@ -152,7 +158,7 @@ fi
 
 #### 1.4 数据根 symlink
 
-仓库根目前**没有** `data` symlink。训练脚本通过 `repo_id` 在 `${HF_LEROBOT_HOME}` 下找数据，同时部分文档用 `data/robotwin/...` 做人工核对。创建一次即可：
+仓库根目前**没有** `data` symlink，`${HF_LEROBOT_HOME}` 也可能是空目录。训练脚本通过 `repo_id` 在 `${HF_LEROBOT_HOME}` 下找数据，同时部分文档用 `data/robotwin/...` 做人工核对。创建一次即可：
 
 ```bash
 export HF_HOME=/tmp/itnvla15rbt20/var/hf_home
@@ -317,7 +323,7 @@ total_episodes: 50 (skipped: 0)
 | WAN | HF 默认 | `/mnt/r/CKPT/Wan2.2-TI2V-5B` | `${HF_HOME}/hub/Wan2.2-TI2V-5B` |
 | `DATASET_REPO_ID` | `aloha-agilex*` glob | `robotwin/stack_bowls_three` | `robotwin/hanging_mug` |
 | external stats | `.../aloha/abs/stats.json` | `agg_1repos_1c27ca3df3` | `agg_1repos_4eb657cb6a` |
-| GPU / batch / steps | 2 / 8 / 60000 | 8 / 16 / 10000 | 同 stackb3 |
+| GPU / batch / steps | 2 / 8 / 60000 | 8 / 16 / 10000 | **6 / 16 / 12500**（本机 6×H200；`STEPS` 可覆盖） |
 | `PYTHONPATH` | 未设 | 未设 | **强制本仓库 `src/`** |
 | `LD_LIBRARY_PATH` | conda + cuda-12.8 | venv/lib + cuda-12.8 | **venv/lib + nvidia pip CUDA 12 库** |
 | `USE_LIBUV` | 未设 | 0 | 0 |
@@ -329,30 +335,30 @@ total_episodes: 50 (skipped: 0)
 ```mermaid
 graph LR
     subgraph "训练配置"
-        A["Effective BS = 16×8 = 128"]
-        B["Total Steps = 10,000"]
+        A["Effective BS = 16×6 = 96"]
+        B["Total Steps = 12,500"]
         C["Warmup = 1,000 steps"]
         D["LR: 5e-5 → 5e-6"]
     end
     subgraph "数据规模"
         E["50 episodes"]
         F["16,889 frames"]
-        G["~132 steps/epoch"]
+        G["~176 steps/epoch"]
     end
-    A & G --> H["~76 epochs"]
-    B & C --> I["Warmup = ~7.6 epochs"]
+    A & G --> H["~71 epochs"]
+    B & C --> I["Warmup = ~5.7 epochs"]
 ```
 
 | 超参数 | 值 | 说明 |
 |---|---|---|
 | `batch_size` | 16 (per GPU) | 32 在三相机 + WAN 下 OOM（stackb3 已验证） |
-| effective batch size | 128 | 16×8 |
-| `steps` | 10000 | 与 stackb3 实际完成的 run 对齐 |
+| effective batch size | 96 | 16×6 |
+| `steps` | **12500**（`STEPS` 环境变量可覆盖） | 相对 8 卡 10k 保持相近 epoch 数 |
 | `optimizer_lr` | 5e-5 | 官方 RoboTwin 微调基线 |
-| `scheduler_warmup_steps` | 1000 | 随 10k steps 缩短（stackb3 venv 脚本） |
-| `scheduler_decay_steps` | 10000 | 与 `steps` 相同 |
+| `scheduler_warmup_steps` | 1000 | 随总步数缩短（相对官方 60k） |
+| `scheduler_decay_steps` | 与 `STEPS` 相同 | 脚本绑 `${STEPS}` |
 | `scheduler_decay_lr` | 5e-6 | 最低学习率 |
-| `save_freq` | 2500 | checkpoint：2500 / 5000 / 7500 / 10000 |
+| `save_freq` | 2500 | checkpoint：2500 / 5000 / 7500 / 10000 / 12500 |
 | `log_freq` | 50 | 小数据集更密的日志 |
 | `dtype` | bfloat16 | 混合精度 |
 | `gradient_checkpointing` | false | H200 显存足够 |
@@ -378,7 +384,7 @@ cd /tmp/SRC/InternVLA-A-series
 bash launch/internvla_a15_finetune_robotwin_hngMg_venv.sh
 ```
 
-如需覆盖：`BATCH_SIZE=8 STEPS=10000 MASTER_PORT=36112 bash launch/internvla_a15_finetune_robotwin_hngMg_venv.sh`。
+如需覆盖：`BATCH_SIZE=8 STEPS=12500 MASTER_PORT=36112 bash launch/internvla_a15_finetune_robotwin_hngMg_venv.sh`。`STEPS` / `BATCH_SIZE` / `SAVE_FREQ` / `PROC_PER_NODE` / `CUDA_VISIBLE_DEVICES` / `MASTER_PORT` 均可环境变量覆盖。
 
 #### 4.2 日志
 
@@ -402,7 +408,8 @@ outputs/internvla_a1_5/<job_name>/checkpoints/
 ├── 005000/
 ├── 007500/
 ├── 010000/
-└── last -> 010000/
+├── 012500/
+└── last -> 012500/
 ```
 
 评测用 `.../checkpoints/last/pretrained_model/`。
@@ -474,7 +481,7 @@ bash evaluation/RoboTwin/eval.sh \
 | `ACTION_MODE` | `abs` | 与训练一致 |
 | `INFER_HORIZON` | `50` | 与 `chunk_size` 一致；脚本默认是 **20** |
 
-中间 checkpoint 可依次评 `002500` / `005000` / `007500` / `010000`。
+中间 checkpoint 可依次评 `002500` / `005000` / `007500` / `010000` / `012500`。
 
 #### 5.3 汇总成功率
 
@@ -509,7 +516,8 @@ python util_scripts/robotwin_result_stats.py outputs/robotwin_eval/hanging_mug
 
 ## Part B：执行记录
 
-> 以下在实际执行后按时间填写。手册写就时训练尚未启动。
+> Session 1 是 8×H200 / 10000 步、在另一台/上一轮环境写下的手册摘要，其 `outputs/` 与 `/tmp/hngMg_logs/` **不在本机**。
+> **本机（6×H200 / 12500 步）的完整执行记录见 [reprd_rbtwn_hngMgLOG.md](reprd_rbtwn_hngMgLOG.md) Session 2，以下不覆盖 Session 1。**
 
 ### 时间线 / 操作日志
 
@@ -550,8 +558,7 @@ python util_scripts/robotwin_result_stats.py outputs/robotwin_eval/hanging_mug
 
 | 指标 | 值 |
 |---|---|
-| 训练总步数 | 尚未执行 |
-| per-GPU batch / effective BS | 计划 16 / 128 |
-| GPU | 8×H200（已确认空闲） |
-| 评测成功率 | 尚未评测 |
-| 训练状态 | **手册已写，等待按 Part A 执行** |
+| 训练总步数（Session 1 计划） | 10000（8 卡；产物不在本机） |
+| 本机计划 | **6×H200，steps=12500，effective BS=96** |
+| 评测成功率 | 本轮不做评测 |
+| 训练状态 | **见 [reprd_rbtwn_hngMgLOG.md](reprd_rbtwn_hngMgLOG.md) Session 2** |
