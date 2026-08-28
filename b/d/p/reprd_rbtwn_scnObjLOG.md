@@ -239,6 +239,7 @@ DIST_LOADING=false
 |---|---|---|
 | `b/d/p/reprd_rbtwn_scnObjLOG.md` | 新增 | 按用户要求记录本次执行全过程 |
 | `launch/internvla_a15_robotwin_common.sh` | 修改 | 禁用当前容器中缺少配置文件的可选 NCCL tuner plugin |
+| `launch/internvla_a15_prepare_robotwin_scnObj.sh` → `launch/internvla_a15_prepare_robotwin.sh` | 重命名并通用化 | 支持单任务、多任务和 `ALL_TASKS=1` 批量准备 |
 | 原 `scan_object` 专用训练入口 → `launch/internvla_a15_finetune_robotwin_comm.sh` | 重命名并通用化 | 训练入口改为支持任一已准备的 RoboTwin 子任务，并自动推导 robot type / stats 路径 |
 
 ## 4. 关键路径
@@ -252,3 +253,118 @@ DIST_LOADING=false
 | 转换数据 | `/B/Dta/RoboTwin-Clean/scan_object_lrb3` |
 | 输出 BASE | `/B/Ckp` |
 | 任务 | `scan_object`，`task_idx=41` |
+
+## 5. 2026-08-28 06:09–06:21 UTC — RoboTwin 全量 v3.0 转换
+
+**操作理由**：通用数据准备脚本改名并支持 `ALL_TASKS=1` 后，将
+`/B/Dta/RoboTwin-Clean/` 下所有不带 `_lrb3` 后缀且包含 `meta/info.json` 的任务统一准备为
+InternVLA-A1.5 所需的 LeRobot v3.0 格式。
+
+**执行命令**：
+
+```bash
+cd /B/SRC/InternVLA-A-series
+ALL_TASKS=1 SKIP_PIP_INSTALL=1 STATS_NUM_WORKERS=8 \
+  bash launch/internvla_a15_prepare_robotwin.sh
+```
+
+**结果**：
+
+- 发现并处理 51 个源任务：50 个 v2.1 任务完成转换，`stack_bowls_three` 原本已是 v3.0，完成标准化复制。
+- 每个任务都生成了 `${ROBOTWIN_CLEAN_ROOT}/<task>_lrb3/`，共 51 个 v3.0 目标目录。
+- 每个 `robotwin/<task>` 和 `robotwin/<task>_lrb3` repo link 都指向对应的 `_lrb3` 目录。
+- 每个任务都通过 `LeRobotDataset` 冒烟检查，三路相机帧非零；每个任务都生成 abs、`chunk_size=50` 的 external stats。
+- 全量校验结果：`source_tasks=51`、`v3_targets=51`、`errors=0`、`ALL_ROBOTWIN_LRB3_VALID`。
+- Clean 源目录未原地改写；转换产生的 HF 缓存临时副本在复制到 Clean 后删除。
+
+**非错误警告**：转换过程中的 PyArrow `promote` FutureWarning 不影响结果。
+
+## 6. 2026-08-28 06:43 UTC（14:43 UTC+8）— 正式训练完成与产物校验
+
+### 6.1 训练完成
+
+正式训练日志最后阶段：
+
+```text
+step:5.0K ... loss:0.123 loss_action:0.001 loss_video:0.104 loss_vqa:0.004
+Checkpoint policy after step 5024
+Checkpoint saved at: .../checkpoints/005024
+Checkpoint policy after step 5025
+Checkpoint saved at: .../checkpoints/005025
+End of training
+```
+
+训练已实际完成全部 5025 steps，即默认 76 epoch 计划完成；没有 OOM、NaN、`video_decode_error` 或 traceback。
+
+### 6.2 训练产物校验
+
+**操作理由**：`End of training` 之后，不能只依赖日志；需要确认每个 25% checkpoint 的模型文件、配置和 stats 都可读，并确认 `last` 指向最终 checkpoint。
+
+```bash
+source /B/VENV/itnvla15rbt20/bin/activate
+python - <<'PY'
+from pathlib import Path
+from safetensors import safe_open
+root = Path('/B/Ckp/itnVla_2608280458/rbt2/scan_object/ckpt_2608280458/checkpoints')
+for d in sorted(root.iterdir()):
+    if d.name == 'last':
+        continue
+    p = d / 'pretrained_model'
+    with safe_open(str(p / 'model.safetensors'), framework='pt', device='cpu') as f:
+        print(d.name, 'keys=', len(f.keys()))
+print('last ->', root.joinpath('last').resolve())
+PY
+```
+
+结果：`001256`、`002512`、`003768`、`005024`、`005025` 均存在；每个 checkpoint 都有 950 个 safetensors keys、`config.json`、`stats.json`、`train_config.json`；`last -> 005025`。
+
+最终 checkpoint：
+
+```text
+/B/Ckp/itnVla_2608280458/rbt2/scan_object/ckpt_2608280458/checkpoints/last/pretrained_model/
+```
+
+最终模型文件大小约 5.1 GiB，`train_config.json` 核对为：
+
+```text
+steps=5025
+save_freq=1256
+batch_size=16
+output_dir=/B/Ckp/itnVla_2608280458/rbt2/scan_object/ckpt_2608280458
+```
+
+### 6.3 外层命令返回码说明
+
+训练日志已明确出现 `End of training`，且所有 checkpoint 已成功写完；但最外层 Shell 任务返回 `exit_code=127`，最后一行错误为：
+
+```text
+launch/internvla_a15_finetune_robotwin_scnObj_venv.sh: line 263: PATH}: command not found
+```
+
+这发生在训练完成之后，属于启动脚本收尾/并发文件变更造成的外层 shell 错误，不是训练子进程失败。实际训练进程已经正常退出，最终权重和训练状态完整。执行期间另一个并发操作将专用脚本重命名为通用入口；因此当前仓库保留的可复用入口是：
+
+```text
+launch/internvla_a15_finetune_robotwin_comm.sh
+```
+
+后续不使用已经被移除的专用入口；如需重跑，应使用通用入口并设置 `TASK_NAME=scan_object`，同时生成新的 `RUN_STAMP`。
+
+### 6.4 最终结果
+
+| 项目 | 结果 |
+|---|---|
+| 任务 | RoboTwin 2.0 `scan_object` |
+| 源数据 | `/B/Dta/RoboTwin-Clean/scan_object`，v2.1，未修改 |
+| 训练数据 | `/B/Dta/RoboTwin-Clean/scan_object_lrb3`，v3.0 |
+| 数据规模 | 50 episodes / 8463 frames / 3 路相机 |
+| 虚拟环境 | `/B/VENV/itnvla15rbt20`，已 source activate |
+| editable 安装 | 成功，`pip install -e /B/SRC/InternVLA-A-series` |
+| GPU | 8×NVIDIA H200 |
+| global / per-GPU batch | 128 / 16 |
+| 训练计划 | 76 epoch，5025 steps |
+| checkpoint | 1256 / 2512 / 3768 / 5024 / 5025 |
+| 最终权重 | `/B/Ckp/itnVla_2608280458/rbt2/scan_object/ckpt_2608280458/checkpoints/005025/pretrained_model` |
+| `last` | 指向 `005025` |
+| 最终 loss | 约 0.12；`loss_action≈0.001`，`loss_video≈0.104`，`loss_vqa≈0.004` |
+| 训练状态 | **成功完成** |
+| closed-loop 评测 | 未执行；需另按 `task_idx=41` 的评测手册运行 |
