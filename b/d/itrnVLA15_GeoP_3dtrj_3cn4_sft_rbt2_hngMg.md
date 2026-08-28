@@ -400,10 +400,11 @@ BRANCH=b0728GeoP
 
 mkdir -p /tmp/SRC
 if [[ ! -d "${PROJ}/.git" ]]; then
-  git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git /tmp/SRC/itvlaGp
-  git config --global user.email "you@example.com"
-  git config --global user.name "Your Name"
-  git config --global pull.rebase false
+  git clone -b b0728GeoP https://github.com/lgautel/InternVLA-A-series.git /B/SRC/itvlaGp
+  git config user.email "you@example.com"
+  git config user.name "Your Name"
+  git config pull.rebase false
+  git config core.fileMode false
 else
   cd "${PROJ}"
   git fetch origin
