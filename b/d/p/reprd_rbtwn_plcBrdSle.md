@@ -1627,3 +1627,286 @@ ROBOT_TYPE=aloha
 
 进程已成功进入 accelerate 启动阶段。accelerate 仅提示未显式传入 `mixed_precision` 和 `dynamo_backend`，使用默认值 `no`；这不是错误。冒烟的最终 step、checkpoint 和 exit code 待本次运行结束后继续追加。
 
+## C.4 2026-08-28 16:02（UTC+8）：训练冒烟成功
+
+**结果**：
+
+- 8 个 rank 初始化成功，未出现 NCCL tuner 错误。
+- base、Qwen3.5、WAN VAE 和 WAN 权重均加载成功。
+- 首次 TileLang kernel 编译成功。
+- step 1–4 均完成；step 4 的日志为 `loss=5.052`、`loss_action=0.169`、`loss_video=0.246`、`loss_vqa=3.119`、`grad_norm=18.342`、`lr=5.0e-06`。
+- `video_decode_error` 未出现。
+- step 2 和 step 4 checkpoint 均成功写入：
+
+  ```text
+  /B/Ckp/itnVla_2608280758/rbt2/place_bread_skillet/ckpt_2608280758sm/checkpoints/000002
+  /B/Ckp/itnVla_2608280758/rbt2/place_bread_skillet/ckpt_2608280758sm/checkpoints/000004
+  ```
+
+- 日志出现 `End of training`，冒烟命令 exit code 为 0。
+
+**非错误警告**：
+
+- Hugging Face Hub 未认证 warning，以及 Qwen 部分可选文件的 404/307 HEAD 请求；本地文件已命中，未影响训练。
+- base checkpoint 缺少 WAN 模块 key 的大量 warning；WAN 已从独立 `Wan2.2-TI2V-5B` 目录成功加载，这是预期行为。
+- DDP 的 `find_unused_parameters=True` 性能 warning；未导致训练失败。
+
+冒烟已验证环境、数据、视频解码、DDP、首步 forward、显存和 checkpoint 写入均正常。正式训练使用新的 `RUN_STAMP`，不复用冒烟输出目录。
+
+## C.5 2026-08-28 16:03（UTC+8）：正式训练启动
+
+**启动前检查**：冒烟进程已正常退出；8 张 H200 均为 0 MiB 使用；没有其它 `lerobot_train`、accelerate DDP 或显存占用辅助进程。
+
+**执行命令**：
+
+```bash
+source /B/VENV/itnvla15rbt20/bin/activate
+cd /B/SRC/InternVLA-A-series
+export PROJ_ROOT="$(pwd)"
+export VENV_ROOT=/B/VENV/itnvla15rbt20
+export HF_HOME=/B/VENV/itnvla15rbt20/var/hf_home
+export HF_LEROBOT_HOME=/B/VENV/itnvla15rbt20/var/hf_home/lerobot
+export CKPT_BASE=/B/Ckp
+export PYTHONPATH="${PROJ_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+
+STAMP="$(date +%y%m%d%H%M)"
+TASK_NAME=place_bread_skillet \
+ITNVLA_STAMP="${STAMP}" \
+RUN_STAMP="${STAMP}" \
+NUM_EPOCHS=76 \
+TOTAL_BATCH_SIZE=128 \
+  bash launch/internvla_a15_finetune_robotwin_comm.sh
+```
+
+**实际启动配置**：
+
+```text
+ITNVLA_STAMP=2608280803
+RUN_STAMP=2608280803
+NUM_FRAMES=8277
+NUM_EPOCHS=76
+TOTAL_BATCH_SIZE=128
+BATCH_SIZE(per GPU)=16
+PROC_PER_NODE=8
+DIST_LOADING=false
+STEPS=4915
+SAVE_FREQ=1228
+WARMUP_STEPS=491
+```
+
+**输出路径**：
+
+```text
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/
+├── train_2608280803.log
+├── job_2608280803.txt
+├── run_2608280803.env
+└── ckpt_2608280803/
+```
+
+进程已通过脚本预检并进入 accelerate 启动阶段。当前日志仅出现 accelerate 默认 `mixed_precision=no`、`dynamo_backend=no` 提示，未出现错误。正式训练的后续 step、checkpoint、监控数据和最终 exit code 待进程结束后继续追加。
+
+## C.6 2026-08-28 16:06（UTC+8）：正式训练早期监控
+
+**加载与初始化结果**：
+
+- 8 个 DDP rank 已成功初始化。
+- 配置确认 `dataset.repo_id=robotwin/place_bread_skillet`、`action_mode=abs`、`chunk_size=50`、`use_external_stats=true`、`video_backend=torchcodec`。
+- external stats 路径命中，数据集为 50 episodes / 8277 frames。
+- policy 参数统计：总参数约 8B，可训练参数约 3B，Qwen3.5 约 2B，action expert 约 460M，WAN 约 5B；WAN DiT 冻结。
+- WAN VAE 与 WAN 权重从本地路径加载成功。
+- TileLang kernel 首次编译成功。
+
+**训练指标**：
+
+| step | loss | loss_action | loss_video | loss_vqa | grad_norm | lr | iters/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 50 | 6.809 | 0.245 | 0.199 | 4.159 | 33.801 | 2.7e-06 | 0.80 |
+| 100 | 4.238 | 0.117 | 0.180 | 2.883 | 13.252 | 7.8e-06 | 0.94 |
+
+step 50 到 step 100 的 loss 和 action loss 均明显下降，当前未出现 OOM、NaN、traceback 或 `video_decode_error`。单卡显存在训练进入稳态后约 135 GiB。
+
+**非错误警告**：
+
+- DDP `find_unused_parameters=True` 性能 warning；没有发现 unused parameter，不影响训练。
+- 未认证 HF Hub warning；模型文件已从本地缓存加载，不影响训练。
+- WAN 缺失 key warning；base 权重不包含 WAN，独立 WAN 权重已成功加载，不影响训练。
+
+## C.7 2026-08-28 16:30（UTC+8）：完成首个 25% checkpoint
+
+正式训练持续稳定运行，期间没有发生需要修复的 error。日志中的代表性指标如下：
+
+| step | epoch | loss | loss_action | loss_video | loss_vqa | grad_norm | lr | iters/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 150 | 2.32 | 2.331 | 0.045 | 0.168 | 1.711 | 8.522 | 1.3e-05 | 0.94 |
+| 300 | 4.64 | 1.034 | 0.012 | 0.140 | 0.771 | 10.947 | 2.8e-05 | 0.91 |
+| 500 | 7.73 | 0.838 | 0.011 | 0.127 | 0.598 | 8.889 | 4.8e-05 | 0.90 |
+| 750 | 11.60 | 0.602 | 0.007 | 0.118 | 0.419 | 8.502 | 4.8e-05 | 0.91 |
+| 1000 | 15.46 | 0.480 | 0.006 | 0.112 | 0.311 | 5.842 | 4.6e-05 | 0.92 |
+| 1200 | 18.56 | 0.412 | 0.005 | 0.112 | 0.247 | 5.031 | 4.4e-05 | 0.94 |
+
+**checkpoint 记录**：
+
+```text
+Checkpoint policy after step 1228
+Checkpoint saved at:
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/ckpt_2608280803/checkpoints/001228
+```
+
+step 1228 checkpoint 已成功写入，训练继续向 step 2456 运行。当前 ETA 约 1 小时 5 分钟，显存和吞吐稳定。
+
+## C.8 2026-08-28 16:54（UTC+8）：完成 50% checkpoint
+
+训练继续稳定，无新增 error。中段指标如下：
+
+| step | epoch | loss | loss_action | loss_video | loss_vqa | grad_norm | lr | iters/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1500 | 23.20 | 0.328 | 0.004 | 0.107 | 0.150 | 4.1 | 4.1e-05 | 0.93 |
+| 1800 | 27.06 | 0.268 | 0.004 | 0.106 | 0.123 | 3.7 | 3.8e-05 | 0.93 |
+| 2000 | 30.93 | 0.216 | 0.003 | 0.099 | 0.083 | 3.3 | 3.4e-05 | 0.89 |
+| 2200 | 34.02 | 0.186 | 0.003 | 0.100 | 0.055 | 2.8 | 3.2e-05 | 0.92 |
+| 2400 | 37.11 | 0.171 | 0.003 | 0.099 | 0.041 | 2.5 | 2.9e-05 | 0.91 |
+| 2500 | 38.66 | 0.164 | 0.003 | 0.103 | 0.030 | 2.5 | 2.7e-05 | 0.92 |
+
+**checkpoint 记录**：
+
+```text
+Checkpoint policy after step 2456
+Checkpoint saved at:
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/ckpt_2608280803/checkpoints/002456
+```
+
+step 2456 checkpoint 已成功写入，训练进入后半程，继续等待 step 3684、4912 和最终 step 4915。
+
+## C.9 2026-08-28 17:18（UTC+8）：完成 75% checkpoint
+
+训练过程仍无 error，loss 持续下降并保持有限值。后半程代表性指标：
+
+| step | epoch | loss | loss_action | loss_video | loss_vqa | grad_norm | lr | iters/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2800 | 43.30 | 0.138 | 0.002 | 0.099 | 0.017 | 1.790 | 2.3e-05 | 0.92 |
+| 3000 | 46.39 | 0.132 | 0.002 | 0.099 | 0.011 | 1.692 | 2.0e-05 | 0.91 |
+| 3200 | 49.49 | 0.124 | 0.002 | 0.096 | 0.007 | 1.473 | 1.8e-05 | 0.90 |
+| 3400 | 52.58 | 0.118 | 0.002 | 0.095 | 0.006 | 1.249 | 1.5e-05 | 0.92 |
+| 3600 | 55.67 | 0.126 | 0.002 | 0.102 | 0.005 | 1.232 | 1.3e-05 | 0.92 |
+| 3684 | 56.45 | 0.113 | 0.002 | 0.093 | 0.005 | 1.200 | 1.2e-05 | 0.92 |
+
+**checkpoint 记录**：
+
+```text
+Checkpoint policy after step 3684
+Checkpoint saved at:
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/ckpt_2608280803/checkpoints/003684
+```
+
+step 3684 checkpoint 已成功写入。剩余训练步数为 1231，继续等待 step 4912（脚本计算的最后四分位 checkpoint）和 step 4915（训练终点）。
+
+## C.10 2026-08-28 17:43（UTC+8）：正式训练成功完成
+
+末段没有发生 error、OOM、NaN、traceback 或视频解码失败。最终日志：
+
+| step | epoch | loss | loss_action | loss_video | loss_vqa | grad_norm | lr | iters/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4200 | 64.18 | 0.113 | 0.001 | 0.098 | 0.003 | 1.019 | 7.8e-06 | 0.92 |
+| 4500 | 68.82 | 0.115 | 0.001 | 0.099 | 0.003 | 0.933 | 6.1e-06 | 0.93 |
+| 4600 | 71.14 | 0.109 | 0.001 | 0.093 | 0.003 | 0.941 | 5.5e-06 | 0.91 |
+| 4800 | 73.46 | 0.109 | 0.001 | 0.092 | 0.003 | 0.851 | 5.2e-06 | 0.90 |
+| 4900 | 75.78 | 0.110 | 0.001 | 0.095 | 0.003 | 0.864 | 5.0e-06 | 0.92 |
+
+**最后两个 checkpoint**：
+
+```text
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/ckpt_2608280803/checkpoints/004912
+/B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet/ckpt_2608280803/checkpoints/004915
+```
+
+**结束标志与进程结果**：
+
+```text
+INFO 2026-08-28 09:43:50 ot_train.py:396 End of training
+exit_code: 0
+elapsed_ms: 6040162
+```
+
+训练从 UTC `08:03:16` 启动，到 UTC `09:43:56` 进程结束，耗时约 1 小时 40 分 40 秒。按日志记录，四个计划保存点 `1228/2456/3684/4912` 和最后一步 `4915` 均已成功保存；训练成功完成。
+
+## C.11 2026-08-28 17:44（UTC+8）：产物核验与收尾
+
+**核验结果**：
+
+- 最终 checkpoint 的 `training_state/training_step.json` 内容为 `{"step": 4915}`。
+- `last/training_state/training_step.json` 同样为 `{"step": 4915}`。
+- 最终 `train_config.json` 确认：
+  - repo id：`robotwin/place_bread_skillet`；
+  - pretrained path：`/B/VENV/itnvla15rbt20/var/hf_home/ckpts/InternVLA-A1.5-base`；
+  - `action_mode=abs`；
+  - `batch_size=16`、`steps=4915`、`save_freq=1228`；
+  - `external_stats_path` 为本次生成的 `agg_1repos_fd0737be54/stats.json`；
+  - `wandb.mode=offline`；
+  - `output_dir` 为本次带时间戳的 checkpoint 目录。
+- 输出目录中存在训练日志、`run_2608280803.env`、`job_2608280803.txt`、offline WandB 数据，以及 `001228`、`002456`、`003684`、`004912`、`004915` 和 `last` checkpoint。
+- 本次没有修改训练脚本或模型源代码；仓库内实际新增/修改的文件只有本操作手册本身，用于追加本次执行记录。数据、stats、checkpoint、日志和 WandB 均位于仓库外的指定输出路径。
+
+**问题与修复汇总**：
+
+本次正式训练没有出现需要修复的 error，因此没有进行代码修复。出现的均为非阻断 warning：未认证 Hub 请求、accelerate 默认参数、DDP `find_unused_parameters` 性能提示、WAN 独立权重加载时 base checkpoint 的缺失 key，以及 device `None` 自动切换到 CUDA。它们均已在上文记录，且冒烟和正式训练都以 exit code 0 完成。
+
+---
+
+# Part D：训练状态监控与产物归档
+
+## D.1 2026-08-28 17:48（UTC+8）：状态判定
+
+根据训练终端和本地输出核验：
+
+- 训练日志最后包含 `End of training`；
+- 训练进程、accelerate 进程和 dataloader 进程均已退出；
+- 8 张 H200 均为 `0 MiB` 使用、GPU 利用率为 `0%`；
+- `004915/training_state/training_step.json` 和 `last/training_state/training_step.json` 均为 step `4915`；
+- `001228`、`002456`、`003684`、`004912`、`004915` checkpoint 均存在；
+- 结论：训练完全成功，不属于“日志 15 分钟不变化但仍占 GPU”的卡死场景，也不属于“训练产出不完整”的错误场景。
+
+## D.2 成功产物上传
+
+**执行命令**：
+
+```bash
+gcloud storage cp --recursive \
+  /B/Ckp/itnVla_2608280803/rbt2/place_bread_skillet \
+  gs://physical-ai-data-eu/VENV/tmp/Rbt2PlcBrdSle0828/place_bread_skillet
+```
+
+**结果**：
+
+- 上传成功，exit code 为 0。
+- 归档根路径：
+
+  ```text
+  gs://physical-ai-data-eu/VENV/tmp/Rbt2PlcBrdSle0828/place_bread_skillet/
+  ```
+
+- 已上传训练日志、job/env 快照、五个编号 checkpoint、`last` 对应的最终 checkpoint 内容、offline WandB 数据及其日志文件。
+- gcloud 报告跳过两个本地 symlink：`wandb/latest-run` 和 `checkpoints/last`。这两个链接的目标内容已分别以实际 offline-run 目录和 `004915` 目录上传，不影响归档完整性。
+- 上传耗时约 17 秒，平均吞吐约 5.4 GiB/s。
+
+## D.3 启动八卡显存占用程序
+
+由于训练成功结束且 GPU 已空闲，按用户要求启动：
+
+```bash
+source /B/VENV/itnvla15rbt20/bin/activate
+cd /B/SRC/InternVLA-A-series
+exec /B/VENV/itnvla15rbt20/bin/python b/d/rbt/fill_8gpu_vram.py
+```
+
+**启动结果**：
+
+```text
+torch 2.10.0+cu128  devices=8  vram=70-90%  compute=70-90%
+initial_vram=85.1%  low_cpu=on  processes=1
+GPU VRAM + compute held (low CPU). Ctrl+C or SIGTERM to stop.
+```
+
+8 张 H200 均已初始化成功，每张约占用 84.9% 显存（约 117.95 GiB），矩阵乘法 CUDA Graph 已建立，程序保持运行中。由于训练进程已不存在，无需额外 kill 训练进程。
+
