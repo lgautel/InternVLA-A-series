@@ -185,6 +185,23 @@ DIST_LOADING=false
 
 正式训练已通过配置解析、数据版本预检和模型启动，当前正在运行。
 
+### 2.5 正式训练早期监控
+
+截至 08:01 UTC，训练已推进到 step 350，日志显示：
+
+```text
+step 50:  loss=6.137 loss_action=0.199 loss_video=0.242 loss_vqa=3.908 grad_norm=25.588
+step 100: loss=3.381 loss_action=0.069 loss_video=0.204 loss_vqa=2.483 grad_norm=10.461
+step 150: loss=2.076 loss_action=0.028 loss_video=0.175 loss_vqa=1.623 grad_norm=11.482
+step 200: loss=1.580 loss_action=0.017 loss_video=0.163 loss_vqa=1.246 grad_norm=14.885
+step 250: loss=1.312 loss_action=0.013 loss_video=0.151 loss_vqa=1.031 grad_norm=16.444
+step 300: loss=1.164 loss_action=0.011 loss_video=0.148 loss_vqa=0.908 grad_norm=16.824
+step 350: loss=1.126 loss_action=0.011 loss_video=0.146 loss_vqa=0.867 grad_norm=15.860
+```
+
+当前吞吐约 `0.90–0.93 iters/s`，日志 ETA 约 1 小时；尚未出现 OOM、NaN、
+`video_decode_error` 或 traceback。训练继续运行。
+
 2026-08-28T07:45:44Z
 PROJ_ROOT            = /B/SRC/InternVLA-A-series
 VENV_ROOT            = /B/VENV/itnvla15rbt20
@@ -1230,16 +1247,32 @@ The new embeddings will be initialized from a multivariate normal distribution t
 The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
 The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
 INFO 2026-08-28 07:53:50 s/vae2_2.py:881 loading /B/VENV/itnvla15rbt20/var/hf_home/hub/Wan2.2-TI2V-5B/Wan2.2_VAE.pth
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 75.24it/s]
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.97it/s]
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.06it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 75.24it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.97it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.06it/s]
 INFO 2026-08-28 07:53:52 wan_model.py:53 WAN Video Model initialized with 4,999,787,712 parameters
 INFO 2026-08-28 07:53:52 an_model.py:118 Loading WAN weights from /B/VENV/itnvla15rbt20/var/hf_home/hub/Wan2.2-TI2V-5B
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 72.90it/s]
-Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 77.43it/s]
-Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 76.44it/s]
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.47it/s]
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 73.59it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 72.90it/s]
+
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 77.43it/s]
+
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 76.44it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 71.47it/s]
+
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 73.59it/s]
 Loading weights from local directory
 Loading weights from local directory
 Loading weights from local directory
@@ -1287,3 +1320,255 @@ INFO 2026-08-28 07:57:19 ot_train.py:367  [92m[1m00:03:13 << 01:03:20[0m | [
 INFO 2026-08-28 07:58:20 ot_train.py:367  [92m[1m00:04:13 << 01:02:39[0m | [96m[1m0.92 iters/s[0m | step:200.0 | sample:26K | episode:209 | epoch:4.18 | loss:1.580 | loss_action:0.017 | grdn:14.885 | lr:2.4e-05 | updt_s:1.093 | data_s:0.099 | loss_vqa:1.246 | loss_video:0.163 | loss_fast:1.338 | loss_subtask:0.000
 INFO 2026-08-28 07:59:20 ot_train.py:367  [92m[1m00:05:14 << 01:01:42[0m | [96m[1m0.92 iters/s[0m | step:250.0 | sample:32K | episode:261 | epoch:5.22 | loss:1.312 | loss_action:0.013 | grdn:16.444 | lr:3.1e-05 | updt_s:1.092 | data_s:0.100 | loss_vqa:1.031 | loss_video:0.151 | loss_fast:1.128 | loss_subtask:0.000
 INFO 2026-08-28 08:00:21 ot_train.py:367  [92m[1m00:06:14 << 01:01:40[0m | [96m[1m0.90 iters/s[0m | step:300.0 | sample:38K | episode:313 | epoch:6.27 | loss:1.164 | loss_action:0.011 | grdn:16.824 | lr:3.8e-05 | updt_s:1.108 | data_s:0.098 | loss_vqa:0.908 | loss_video:0.148 | loss_fast:0.994 | loss_subtask:0.000
+INFO 2026-08-28 08:01:21 ot_train.py:367  [92m[1m00:07:15 << 01:00:13[0m | [96m[1m0.91 iters/s[0m | step:350.0 | sample:45K | episode:365 | epoch:7.31 | loss:1.126 | loss_action:0.011 | grdn:15.860 | lr:4.5e-05 | updt_s:1.098 | data_s:0.104 | loss_vqa:0.867 | loss_video:0.146 | loss_fast:0.941 | loss_subtask:0.000
+INFO 2026-08-28 08:03:21 ot_train.py:367  [92m[1m00:09:15 << 00:58:11[0m | [96m[1m0.91 iters/s[0m | step:450.0 | sample:58K | episode:470 | epoch:9.40 | loss:0.943 | loss_action:0.009 | grdn:13.914 | lr:4.8e-05 | updt_s:1.094 | data_s:0.101 | loss_vqa:0.720 | loss_video:0.134 | loss_fast:0.782 | loss_subtask:0.000
+INFO 2026-08-28 08:04:22 ot_train.py:367  [92m[1m00:10:16 << 00:58:05[0m | [96m[1m0.90 iters/s[0m | step:500.0 | sample:64K | episode:522 | epoch:10.44 | loss:0.856 | loss_action:0.008 | grdn:13.470 | lr:4.8e-05 | updt_s:1.110 | data_s:0.093 | loss_vqa:0.644 | loss_video:0.129 | loss_fast:0.715 | loss_subtask:0.000
+INFO 2026-08-28 08:05:23 ot_train.py:367  [92m[1m00:11:17 << 00:56:46[0m | [96m[1m0.91 iters/s[0m | step:550.0 | sample:70K | episode:574 | epoch:11.49 | loss:0.790 | loss_action:0.007 | grdn:12.897 | lr:4.8e-05 | updt_s:1.102 | data_s:0.101 | loss_vqa:0.592 | loss_video:0.125 | loss_fast:0.649 | loss_subtask:0.000
+INFO 2026-08-28 08:06:23 ot_train.py:367  [92m[1m00:12:17 << 00:56:04[0m | [96m[1m0.90 iters/s[0m | step:600.0 | sample:77K | episode:627 | epoch:12.53 | loss:0.742 | loss_action:0.007 | grdn:12.270 | lr:4.7e-05 | updt_s:1.107 | data_s:0.093 | loss_vqa:0.544 | loss_video:0.127 | loss_fast:0.596 | loss_subtask:0.000
+INFO 2026-08-28 08:07:23 ot_train.py:367  [92m[1m00:13:17 << 00:53:57[0m | [96m[1m0.92 iters/s[0m | step:650.0 | sample:83K | episode:679 | epoch:13.57 | loss:0.698 | loss_action:0.007 | grdn:11.796 | lr:4.7e-05 | updt_s:1.083 | data_s:0.104 | loss_vqa:0.506 | loss_video:0.126 | loss_fast:0.549 | loss_subtask:0.000
+INFO 2026-08-28 08:08:24 ot_train.py:367  [92m[1m00:14:18 << 00:53:48[0m | [96m[1m0.91 iters/s[0m | step:700.0 | sample:90K | episode:731 | epoch:14.62 | loss:0.644 | loss_action:0.006 | grdn:11.958 | lr:4.6e-05 | updt_s:1.098 | data_s:0.102 | loss_vqa:0.459 | loss_video:0.125 | loss_fast:0.506 | loss_subtask:0.000
+INFO 2026-08-28 08:09:26 ot_train.py:367  [92m[1m00:15:20 << 00:54:24[0m | [96m[1m0.89 iters/s[0m | step:750.0 | sample:96K | episode:783 | epoch:15.66 | loss:0.600 | loss_action:0.005 | grdn:11.904 | lr:4.6e-05 | updt_s:1.130 | data_s:0.100 | loss_vqa:0.427 | loss_video:0.121 | loss_fast:0.469 | loss_subtask:0.000
+INFO 2026-08-28 08:10:27 ot_train.py:367  [92m[1m00:16:21 << 00:53:00[0m | [96m[1m0.89 iters/s[0m | step:800.0 | sample:102K | episode:835 | epoch:16.71 | loss:0.591 | loss_action:0.006 | grdn:11.564 | lr:4.5e-05 | updt_s:1.120 | data_s:0.098 | loss_vqa:0.411 | loss_video:0.122 | loss_fast:0.451 | loss_subtask:0.000
+INFO 2026-08-28 08:11:28 ot_train.py:367  [92m[1m00:17:22 << 00:51:32[0m | [96m[1m0.90 iters/s[0m | step:850.0 | sample:109K | episode:888 | epoch:17.75 | loss:0.542 | loss_action:0.005 | grdn:11.012 | lr:4.5e-05 | updt_s:1.108 | data_s:0.099 | loss_vqa:0.374 | loss_video:0.117 | loss_fast:0.413 | loss_subtask:0.000
+INFO 2026-08-28 08:12:29 ot_train.py:367  [92m[1m00:18:23 << 00:50:26[0m | [96m[1m0.91 iters/s[0m | step:900.0 | sample:115K | episode:940 | epoch:18.80 | loss:0.532 | loss_action:0.006 | grdn:10.351 | lr:4.4e-05 | updt_s:1.105 | data_s:0.095 | loss_vqa:0.352 | loss_video:0.122 | loss_fast:0.389 | loss_subtask:0.000
+INFO 2026-08-28 08:12:39 ot_train.py:377 Checkpoint policy after step 910
+INFO 2026-08-28 08:12:39 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/000910
+INFO 2026-08-28 08:13:57 ot_train.py:367  [92m[1m00:19:51 << 00:50:24[0m | [96m[1m0.89 iters/s[0m | step:950.0 | sample:122K | episode:992 | epoch:19.84 | loss:0.488 | loss_action:0.005 | grdn:10.027 | lr:4.3e-05 | updt_s:1.124 | data_s:0.096 | loss_vqa:0.321 | loss_video:0.115 | loss_fast:0.358 | loss_subtask:0.000
+INFO 2026-08-28 08:14:58 ot_train.py:367  [92m[1m00:20:52 << 00:48:59[0m | [96m[1m0.90 iters/s[0m | step:1.0K | sample:128K | episode:1K | epoch:20.88 | loss:0.447 | loss_action:0.005 | grdn:9.240 | lr:4.2e-05 | updt_s:1.113 | data_s:0.097 | loss_vqa:0.285 | loss_video:0.114 | loss_fast:0.313 | loss_subtask:0.000
+INFO 2026-08-28 08:15:59 ot_train.py:367  [92m[1m00:21:53 << 00:47:37[0m | [96m[1m0.91 iters/s[0m | step:1.1K | sample:134K | episode:1K | epoch:21.93 | loss:0.440 | loss_action:0.004 | grdn:9.014 | lr:4.2e-05 | updt_s:1.103 | data_s:0.099 | loss_vqa:0.282 | loss_video:0.116 | loss_fast:0.312 | loss_subtask:0.000
+INFO 2026-08-28 08:17:00 ot_train.py:367  [92m[1m00:22:54 << 00:46:45[0m | [96m[1m0.91 iters/s[0m | step:1.1K | sample:141K | episode:1K | epoch:22.97 | loss:0.415 | loss_action:0.004 | grdn:8.181 | lr:4.1e-05 | updt_s:1.105 | data_s:0.096 | loss_vqa:0.256 | loss_video:0.114 | loss_fast:0.282 | loss_subtask:0.000
+INFO 2026-08-28 08:18:00 ot_train.py:367  [92m[1m00:23:54 << 00:45:44[0m | [96m[1m0.91 iters/s[0m | step:1.1K | sample:147K | episode:1K | epoch:24.02 | loss:0.386 | loss_action:0.004 | grdn:7.903 | lr:4.0e-05 | updt_s:1.102 | data_s:0.103 | loss_vqa:0.237 | loss_video:0.113 | loss_fast:0.266 | loss_subtask:0.000
+INFO 2026-08-28 08:19:03 ot_train.py:367  [92m[1m00:24:57 << 00:45:52[0m | [96m[1m0.89 iters/s[0m | step:1.2K | sample:154K | episode:1K | epoch:25.06 | loss:0.386 | loss_action:0.005 | grdn:8.361 | lr:3.9e-05 | updt_s:1.128 | data_s:0.107 | loss_vqa:0.223 | loss_video:0.118 | loss_fast:0.242 | loss_subtask:0.000
+INFO 2026-08-28 08:20:09 ot_train.py:367  [92m[1m00:26:03 << 00:45:59[0m | [96m[1m0.87 iters/s[0m | step:1.2K | sample:160K | episode:1K | epoch:26.11 | loss:0.357 | loss_action:0.004 | grdn:7.669 | lr:3.9e-05 | updt_s:1.155 | data_s:0.172 | loss_vqa:0.208 | loss_video:0.108 | loss_fast:0.229 | loss_subtask:0.000
+INFO 2026-08-28 08:21:11 ot_train.py:367  [92m[1m00:27:05 << 00:43:39[0m | [96m[1m0.89 iters/s[0m | step:1.3K | sample:166K | episode:1K | epoch:27.15 | loss:0.340 | loss_action:0.004 | grdn:7.773 | lr:3.8e-05 | updt_s:1.120 | data_s:0.103 | loss_vqa:0.189 | loss_video:0.114 | loss_fast:0.210 | loss_subtask:0.000
+INFO 2026-08-28 08:22:13 ot_train.py:367  [92m[1m00:28:07 << 00:42:45[0m | [96m[1m0.89 iters/s[0m | step:1.4K | sample:173K | episode:1K | epoch:28.19 | loss:0.321 | loss_action:0.003 | grdn:7.629 | lr:3.7e-05 | updt_s:1.120 | data_s:0.103 | loss_vqa:0.179 | loss_video:0.110 | loss_fast:0.199 | loss_subtask:0.000
+INFO 2026-08-28 08:23:15 ot_train.py:367  [92m[1m00:29:09 << 00:42:13[0m | [96m[1m0.88 iters/s[0m | step:1.4K | sample:179K | episode:1K | epoch:29.24 | loss:0.311 | loss_action:0.004 | grdn:7.169 | lr:3.6e-05 | updt_s:1.131 | data_s:0.097 | loss_vqa:0.160 | loss_video:0.112 | loss_fast:0.180 | loss_subtask:0.000
+INFO 2026-08-28 08:24:17 ot_train.py:367  [92m[1m00:30:11 << 00:41:05[0m | [96m[1m0.89 iters/s[0m | step:1.4K | sample:186K | episode:2K | epoch:30.28 | loss:0.293 | loss_action:0.004 | grdn:6.892 | lr:3.5e-05 | updt_s:1.126 | data_s:0.099 | loss_vqa:0.146 | loss_video:0.111 | loss_fast:0.163 | loss_subtask:0.000
+INFO 2026-08-28 08:25:18 ot_train.py:367  [92m[1m00:31:12 << 00:40:14[0m | [96m[1m0.89 iters/s[0m | step:1.5K | sample:192K | episode:2K | epoch:31.33 | loss:0.286 | loss_action:0.003 | grdn:6.765 | lr:3.4e-05 | updt_s:1.128 | data_s:0.100 | loss_vqa:0.142 | loss_video:0.112 | loss_fast:0.158 | loss_subtask:0.000
+INFO 2026-08-28 08:26:20 ot_train.py:367  [92m[1m00:32:14 << 00:38:59[0m | [96m[1m0.89 iters/s[0m | step:1.6K | sample:198K | episode:2K | epoch:32.37 | loss:0.257 | loss_action:0.003 | grdn:6.386 | lr:3.3e-05 | updt_s:1.119 | data_s:0.097 | loss_vqa:0.125 | loss_video:0.101 | loss_fast:0.139 | loss_subtask:0.000
+INFO 2026-08-28 08:27:20 ot_train.py:367  [92m[1m00:33:14 << 00:37:10[0m | [96m[1m0.91 iters/s[0m | step:1.6K | sample:205K | episode:2K | epoch:33.41 | loss:0.266 | loss_action:0.004 | grdn:6.298 | lr:3.2e-05 | updt_s:1.093 | data_s:0.101 | loss_vqa:0.117 | loss_video:0.111 | loss_fast:0.130 | loss_subtask:0.000
+INFO 2026-08-28 08:28:22 ot_train.py:367  [92m[1m00:34:16 << 00:37:27[0m | [96m[1m0.89 iters/s[0m | step:1.6K | sample:211K | episode:2K | epoch:34.46 | loss:0.247 | loss_action:0.003 | grdn:5.983 | lr:3.1e-05 | updt_s:1.129 | data_s:0.089 | loss_vqa:0.107 | loss_video:0.106 | loss_fast:0.118 | loss_subtask:0.000
+INFO 2026-08-28 08:29:23 ot_train.py:367  [92m[1m00:35:17 << 00:36:06[0m | [96m[1m0.90 iters/s[0m | step:1.7K | sample:218K | episode:2K | epoch:35.50 | loss:0.244 | loss_action:0.004 | grdn:5.611 | lr:3.0e-05 | updt_s:1.117 | data_s:0.094 | loss_vqa:0.102 | loss_video:0.107 | loss_fast:0.113 | loss_subtask:0.000
+INFO 2026-08-28 08:30:25 ot_train.py:367  [92m[1m00:36:19 << 00:35:49[0m | [96m[1m0.88 iters/s[0m | step:1.8K | sample:224K | episode:2K | epoch:36.55 | loss:0.236 | loss_action:0.003 | grdn:6.026 | lr:2.9e-05 | updt_s:1.137 | data_s:0.093 | loss_vqa:0.095 | loss_video:0.110 | loss_fast:0.104 | loss_subtask:0.000
+INFO 2026-08-28 08:31:26 ot_train.py:367  [92m[1m00:37:20 << 00:34:11[0m | [96m[1m0.90 iters/s[0m | step:1.8K | sample:230K | episode:2K | epoch:37.59 | loss:0.216 | loss_action:0.003 | grdn:5.366 | lr:2.8e-05 | updt_s:1.115 | data_s:0.102 | loss_vqa:0.079 | loss_video:0.107 | loss_fast:0.088 | loss_subtask:0.000
+INFO 2026-08-28 08:31:48 ot_train.py:377 Checkpoint policy after step 1820
+INFO 2026-08-28 08:31:48 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/001820
+INFO 2026-08-28 08:32:54 ot_train.py:367  [92m[1m00:38:48 << 00:33:42[0m | [96m[1m0.88 iters/s[0m | step:1.9K | sample:237K | episode:2K | epoch:38.64 | loss:0.203 | loss_action:0.002 | grdn:5.221 | lr:2.7e-05 | updt_s:1.130 | data_s:0.098 | loss_vqa:0.074 | loss_video:0.105 | loss_fast:0.083 | loss_subtask:0.000
+INFO 2026-08-28 08:33:57 ot_train.py:367  [92m[1m00:39:50 << 00:32:58[0m | [96m[1m0.88 iters/s[0m | step:1.9K | sample:243K | episode:2K | epoch:39.68 | loss:0.212 | loss_action:0.004 | grdn:4.790 | lr:2.6e-05 | updt_s:1.137 | data_s:0.100 | loss_vqa:0.064 | loss_video:0.108 | loss_fast:0.072 | loss_subtask:0.000
+INFO 2026-08-28 08:34:58 ot_train.py:367  [92m[1m00:40:52 << 00:31:35[0m | [96m[1m0.89 iters/s[0m | step:1.9K | sample:250K | episode:2K | epoch:40.72 | loss:0.192 | loss_action:0.002 | grdn:4.846 | lr:2.5e-05 | updt_s:1.122 | data_s:0.105 | loss_vqa:0.061 | loss_video:0.106 | loss_fast:0.068 | loss_subtask:0.000
+INFO 2026-08-28 08:36:00 ot_train.py:367  [92m[1m00:41:54 << 00:30:34[0m | [96m[1m0.89 iters/s[0m | step:2.0K | sample:256K | episode:2K | epoch:41.77 | loss:0.182 | loss_action:0.003 | grdn:4.646 | lr:2.4e-05 | updt_s:1.119 | data_s:0.103 | loss_vqa:0.054 | loss_video:0.102 | loss_fast:0.061 | loss_subtask:0.000
+INFO 2026-08-28 08:37:01 ot_train.py:367  [92m[1m00:42:55 << 00:29:35[0m | [96m[1m0.90 iters/s[0m | step:2.0K | sample:262K | episode:2K | epoch:42.81 | loss:0.183 | loss_action:0.003 | grdn:4.353 | lr:2.4e-05 | updt_s:1.117 | data_s:0.098 | loss_vqa:0.051 | loss_video:0.106 | loss_fast:0.057 | loss_subtask:0.000
+INFO 2026-08-28 08:38:02 ot_train.py:367  [92m[1m00:43:56 << 00:28:34[0m | [96m[1m0.90 iters/s[0m | step:2.1K | sample:269K | episode:2K | epoch:43.86 | loss:0.178 | loss_action:0.003 | grdn:4.080 | lr:2.3e-05 | updt_s:1.114 | data_s:0.102 | loss_vqa:0.046 | loss_video:0.107 | loss_fast:0.051 | loss_subtask:0.000
+INFO 2026-08-28 08:39:04 ot_train.py:367  [92m[1m00:44:58 << 00:28:07[0m | [96m[1m0.88 iters/s[0m | step:2.1K | sample:275K | episode:2K | epoch:44.90 | loss:0.178 | loss_action:0.003 | grdn:4.034 | lr:2.2e-05 | updt_s:1.133 | data_s:0.098 | loss_vqa:0.042 | loss_video:0.111 | loss_fast:0.046 | loss_subtask:0.000
+INFO 2026-08-28 08:40:06 ot_train.py:367  [92m[1m00:46:00 << 00:26:52[0m | [96m[1m0.89 iters/s[0m | step:2.2K | sample:282K | episode:2K | epoch:45.95 | loss:0.167 | loss_action:0.002 | grdn:3.679 | lr:2.1e-05 | updt_s:1.120 | data_s:0.099 | loss_vqa:0.036 | loss_video:0.106 | loss_fast:0.041 | loss_subtask:0.000
+INFO 2026-08-28 08:41:07 ot_train.py:367  [92m[1m00:47:01 << 00:25:29[0m | [96m[1m0.91 iters/s[0m | step:2.2K | sample:288K | episode:2K | epoch:46.99 | loss:0.160 | loss_action:0.003 | grdn:3.596 | lr:2.0e-05 | updt_s:1.100 | data_s:0.110 | loss_vqa:0.034 | loss_video:0.100 | loss_fast:0.038 | loss_subtask:0.000
+INFO 2026-08-28 08:42:07 ot_train.py:367  [92m[1m00:48:01 << 00:24:42[0m | [96m[1m0.90 iters/s[0m | step:2.3K | sample:294K | episode:2K | epoch:48.03 | loss:0.161 | loss_action:0.002 | grdn:3.426 | lr:1.9e-05 | updt_s:1.106 | data_s:0.090 | loss_vqa:0.030 | loss_video:0.107 | loss_fast:0.034 | loss_subtask:0.000
+INFO 2026-08-28 08:43:09 ot_train.py:367  [92m[1m00:49:03 << 00:24:29[0m | [96m[1m0.88 iters/s[0m | step:2.4K | sample:301K | episode:2K | epoch:49.08 | loss:0.150 | loss_action:0.002 | grdn:3.004 | lr:1.8e-05 | updt_s:1.139 | data_s:0.082 | loss_vqa:0.027 | loss_video:0.103 | loss_fast:0.031 | loss_subtask:0.000
+INFO 2026-08-28 08:44:10 ot_train.py:367  [92m[1m00:50:04 << 00:23:31[0m | [96m[1m0.88 iters/s[0m | step:2.4K | sample:307K | episode:3K | epoch:50.12 | loss:0.153 | loss_action:0.003 | grdn:2.905 | lr:1.7e-05 | updt_s:1.138 | data_s:0.088 | loss_vqa:0.025 | loss_video:0.102 | loss_fast:0.028 | loss_subtask:0.000
+INFO 2026-08-28 08:45:17 ot_train.py:367  [92m[1m00:51:11 << 00:22:50[0m | [96m[1m0.87 iters/s[0m | step:2.5K | sample:314K | episode:3K | epoch:51.17 | loss:0.146 | loss_action:0.002 | grdn:2.951 | lr:1.6e-05 | updt_s:1.152 | data_s:0.162 | loss_vqa:0.022 | loss_video:0.106 | loss_fast:0.026 | loss_subtask:0.000
+INFO 2026-08-28 08:46:18 ot_train.py:367  [92m[1m00:52:12 << 00:21:23[0m | [96m[1m0.89 iters/s[0m | step:2.5K | sample:320K | episode:3K | epoch:52.21 | loss:0.154 | loss_action:0.003 | grdn:2.710 | lr:1.5e-05 | updt_s:1.126 | data_s:0.087 | loss_vqa:0.021 | loss_video:0.108 | loss_fast:0.023 | loss_subtask:0.000
+INFO 2026-08-28 08:47:19 ot_train.py:367  [92m[1m00:53:13 << 00:20:19[0m | [96m[1m0.89 iters/s[0m | step:2.5K | sample:326K | episode:3K | epoch:53.26 | loss:0.143 | loss_action:0.002 | grdn:2.743 | lr:1.5e-05 | updt_s:1.119 | data_s:0.085 | loss_vqa:0.018 | loss_video:0.103 | loss_fast:0.020 | loss_subtask:0.000
+INFO 2026-08-28 08:48:20 ot_train.py:367  [92m[1m00:54:14 << 00:19:53[0m | [96m[1m0.87 iters/s[0m | step:2.6K | sample:333K | episode:3K | epoch:54.30 | loss:0.139 | loss_action:0.002 | grdn:2.461 | lr:1.4e-05 | updt_s:1.147 | data_s:0.079 | loss_vqa:0.017 | loss_video:0.105 | loss_fast:0.020 | loss_subtask:0.000
+INFO 2026-08-28 08:49:21 ot_train.py:367  [92m[1m00:55:15 << 00:18:30[0m | [96m[1m0.89 iters/s[0m | step:2.6K | sample:339K | episode:3K | epoch:55.34 | loss:0.142 | loss_action:0.002 | grdn:2.483 | lr:1.3e-05 | updt_s:1.122 | data_s:0.081 | loss_vqa:0.016 | loss_video:0.105 | loss_fast:0.018 | loss_subtask:0.000
+INFO 2026-08-28 08:50:23 ot_train.py:367  [92m[1m00:56:17 << 00:17:38[0m | [96m[1m0.89 iters/s[0m | step:2.7K | sample:346K | episode:3K | epoch:56.39 | loss:0.135 | loss_action:0.002 | grdn:2.167 | lr:1.2e-05 | updt_s:1.126 | data_s:0.093 | loss_vqa:0.015 | loss_video:0.103 | loss_fast:0.016 | loss_subtask:0.000
+INFO 2026-08-28 08:50:55 ot_train.py:377 Checkpoint policy after step 2730
+INFO 2026-08-28 08:50:55 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/002730
+INFO 2026-08-28 08:51:47 ot_train.py:367  [92m[1m00:57:41 << 00:16:31[0m | [96m[1m0.90 iters/s[0m | step:2.8K | sample:352K | episode:3K | epoch:57.43 | loss:0.132 | loss_action:0.002 | grdn:2.473 | lr:1.2e-05 | updt_s:1.114 | data_s:0.096 | loss_vqa:0.015 | loss_video:0.101 | loss_fast:0.017 | loss_subtask:0.000
+INFO 2026-08-28 08:52:48 ot_train.py:367  [92m[1m00:58:42 << 00:15:18[0m | [96m[1m0.91 iters/s[0m | step:2.8K | sample:358K | episode:3K | epoch:58.48 | loss:0.135 | loss_action:0.002 | grdn:1.969 | lr:1.1e-05 | updt_s:1.093 | data_s:0.098 | loss_vqa:0.013 | loss_video:0.105 | loss_fast:0.015 | loss_subtask:0.000
+INFO 2026-08-28 08:53:49 ot_train.py:367  [92m[1m00:59:43 << 00:14:45[0m | [96m[1m0.89 iters/s[0m | step:2.9K | sample:365K | episode:3K | epoch:59.52 | loss:0.136 | loss_action:0.002 | grdn:1.861 | lr:1.0e-05 | updt_s:1.121 | data_s:0.099 | loss_vqa:0.012 | loss_video:0.109 | loss_fast:0.014 | loss_subtask:0.000
+INFO 2026-08-28 08:54:51 ot_train.py:367  [92m[1m01:00:45 << 00:13:55[0m | [96m[1m0.89 iters/s[0m | step:2.9K | sample:371K | episode:3K | epoch:60.56 | loss:0.135 | loss_action:0.002 | grdn:1.889 | lr:9.7e-06 | updt_s:1.130 | data_s:0.103 | loss_vqa:0.011 | loss_video:0.104 | loss_fast:0.013 | loss_subtask:0.000
+INFO 2026-08-28 08:55:53 ot_train.py:367  [92m[1m01:01:47 << 00:12:58[0m | [96m[1m0.89 iters/s[0m | step:3.0K | sample:378K | episode:3K | epoch:61.61 | loss:0.138 | loss_action:0.002 | grdn:1.887 | lr:9.1e-06 | updt_s:1.128 | data_s:0.103 | loss_vqa:0.011 | loss_video:0.109 | loss_fast:0.012 | loss_subtask:0.000
+INFO 2026-08-28 08:56:54 ot_train.py:367  [92m[1m01:02:48 << 00:11:47[0m | [96m[1m0.90 iters/s[0m | step:3.0K | sample:384K | episode:3K | epoch:62.65 | loss:0.135 | loss_action:0.002 | grdn:1.636 | lr:8.6e-06 | updt_s:1.105 | data_s:0.101 | loss_vqa:0.011 | loss_video:0.106 | loss_fast:0.012 | loss_subtask:0.000
+INFO 2026-08-28 08:57:55 ot_train.py:367  [92m[1m01:03:49 << 00:10:55[0m | [96m[1m0.90 iters/s[0m | step:3.0K | sample:390K | episode:3K | epoch:63.70 | loss:0.132 | loss_action:0.002 | grdn:1.530 | lr:8.1e-06 | updt_s:1.111 | data_s:0.095 | loss_vqa:0.010 | loss_video:0.105 | loss_fast:0.011 | loss_subtask:0.000
+INFO 2026-08-28 08:58:57 ot_train.py:367  [92m[1m01:04:51 << 00:10:06[0m | [96m[1m0.89 iters/s[0m | step:3.1K | sample:397K | episode:3K | epoch:64.74 | loss:0.135 | loss_action:0.002 | grdn:1.656 | lr:7.6e-06 | updt_s:1.122 | data_s:0.100 | loss_vqa:0.010 | loss_video:0.105 | loss_fast:0.011 | loss_subtask:0.000
+INFO 2026-08-28 08:59:59 ot_train.py:367  [92m[1m01:05:53 << 00:09:15[0m | [96m[1m0.88 iters/s[0m | step:3.1K | sample:403K | episode:3K | epoch:65.79 | loss:0.123 | loss_action:0.001 | grdn:1.469 | lr:7.2e-06 | updt_s:1.134 | data_s:0.097 | loss_vqa:0.009 | loss_video:0.100 | loss_fast:0.010 | loss_subtask:0.000
+INFO 2026-08-28 09:01:01 ot_train.py:367  [92m[1m01:06:55 << 00:08:17[0m | [96m[1m0.88 iters/s[0m | step:3.2K | sample:410K | episode:3K | epoch:66.83 | loss:0.130 | loss_action:0.002 | grdn:1.538 | lr:6.8e-06 | updt_s:1.131 | data_s:0.101 | loss_vqa:0.009 | loss_video:0.104 | loss_fast:0.010 | loss_subtask:0.000
+INFO 2026-08-28 09:02:01 ot_train.py:367  [92m[1m01:07:55 << 00:07:11[0m | [96m[1m0.90 iters/s[0m | step:3.2K | sample:416K | episode:3K | epoch:67.87 | loss:0.128 | loss_action:0.002 | grdn:1.528 | lr:6.4e-06 | updt_s:1.106 | data_s:0.104 | loss_vqa:0.009 | loss_video:0.102 | loss_fast:0.010 | loss_subtask:0.000
+INFO 2026-08-28 09:03:03 ot_train.py:367  [92m[1m01:08:57 << 00:06:21[0m | [96m[1m0.89 iters/s[0m | step:3.3K | sample:422K | episode:3K | epoch:68.92 | loss:0.131 | loss_action:0.002 | grdn:1.388 | lr:6.1e-06 | updt_s:1.122 | data_s:0.100 | loss_vqa:0.008 | loss_video:0.105 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:04:05 ot_train.py:367  [92m[1m01:09:59 << 00:05:27[0m | [96m[1m0.88 iters/s[0m | step:3.4K | sample:429K | episode:3K | epoch:69.96 | loss:0.124 | loss_action:0.002 | grdn:1.492 | lr:5.8e-06 | updt_s:1.130 | data_s:0.095 | loss_vqa:0.008 | loss_video:0.100 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:05:06 ot_train.py:367  [92m[1m01:11:00 << 00:04:26[0m | [96m[1m0.90 iters/s[0m | step:3.4K | sample:435K | episode:4K | epoch:71.01 | loss:0.126 | loss_action:0.001 | grdn:1.347 | lr:5.6e-06 | updt_s:1.112 | data_s:0.100 | loss_vqa:0.008 | loss_video:0.104 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:06:08 ot_train.py:367  [92m[1m01:12:02 << 00:03:33[0m | [96m[1m0.89 iters/s[0m | step:3.5K | sample:442K | episode:4K | epoch:72.05 | loss:0.127 | loss_action:0.001 | grdn:1.338 | lr:5.4e-06 | updt_s:1.121 | data_s:0.103 | loss_vqa:0.008 | loss_video:0.107 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:07:09 ot_train.py:367  [92m[1m01:13:03 << 00:02:33[0m | [96m[1m0.91 iters/s[0m | step:3.5K | sample:448K | episode:4K | epoch:73.10 | loss:0.131 | loss_action:0.002 | grdn:1.428 | lr:5.2e-06 | updt_s:1.097 | data_s:0.117 | loss_vqa:0.008 | loss_video:0.105 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:08:10 ot_train.py:367  [92m[1m01:14:04 << 00:01:38[0m | [96m[1m0.91 iters/s[0m | step:3.5K | sample:454K | episode:4K | epoch:74.14 | loss:0.128 | loss_action:0.001 | grdn:1.274 | lr:5.1e-06 | updt_s:1.098 | data_s:0.115 | loss_vqa:0.008 | loss_video:0.107 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:09:11 ot_train.py:367  [92m[1m01:15:05 << 00:00:43[0m | [96m[1m0.91 iters/s[0m | step:3.6K | sample:461K | episode:4K | epoch:75.18 | loss:0.134 | loss_action:0.002 | grdn:1.385 | lr:5.0e-06 | updt_s:1.099 | data_s:0.114 | loss_vqa:0.008 | loss_video:0.108 | loss_fast:0.009 | loss_subtask:0.000
+INFO 2026-08-28 09:10:01 ot_train.py:377 Checkpoint policy after step 3640
+INFO 2026-08-28 09:10:01 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/003640
+INFO 2026-08-28 09:10:31 ot_train.py:396 End of training
+2026-08-28T09:15:45Z
+--- completion markers ---
+413:INFO 2026-08-28 08:12:39 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/000910
+433:INFO 2026-08-28 08:31:48 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/001820
+453:INFO 2026-08-28 08:50:55 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/002730
+473:INFO 2026-08-28 09:10:01 ot_train.py:379 Checkpoint saved at: /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/003640
+474:INFO 2026-08-28 09:10:31 ot_train.py:396 End of training
+--- checkpoint validation ---
+000910 keys= 950 policy= internvla_a1_5 stats= ['aloha']
+001820 keys= 950 policy= internvla_a1_5 stats= ['aloha']
+002730 keys= 950 policy= internvla_a1_5 stats= ['aloha']
+003640 keys= 950 policy= internvla_a1_5 stats= ['aloha']
+last -> /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/003640
+CHECKPOINT_VALIDATION_OK
+--- disk usage ---
+61G	/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles
+
+## 3. 正式训练完成总结
+
+### 3.1 最终结果
+
+正式训练于 2026-08-28 09:10 UTC（17:10 UTC+8）完成，训练进程 exit code 为 0，
+日志出现 `End of training`。
+
+| 项目 | 结果 |
+|---|---|
+| 任务 | `pick_dual_bottles` |
+| 数据 | 50 episodes / 6129 frames / 3 路相机 |
+| 数据版本 | LeRobot `v3.0` |
+| robot type | `aloha` |
+| GPU | 8× NVIDIA H200 |
+| global batch | 128 |
+| per-GPU batch | 16 |
+| 训练计划 | 76 epochs |
+| 实际总 step | 3640 |
+| save frequency | 910 |
+| warmup steps | 364 |
+| 训练耗时 | 约 1 小时 18 分钟 |
+| 最后记录的 step | 3600，loss=0.134，loss_action=0.002 |
+| 训练输出根 | `/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles` |
+| 最终 checkpoint | `ckpt_2608280751/checkpoints/003640/pretrained_model` |
+| `last` | 指向 `003640` |
+
+### 3.2 Checkpoint 验证结果
+
+以下 checkpoint 均存在 `config.json`、`model.safetensors` 和 `stats.json`，每个
+模型包含 950 个 safetensors keys，policy type 为 `internvla_a1_5`，stats 顶层
+包含 `aloha`：
+
+```text
+000910  OK
+001820  OK
+002730  OK
+003640  OK
+last -> 003640  OK
+```
+
+### 3.3 错误、警告和修复记录
+
+本次数据准备、冒烟和正式训练没有发生需要修复的 fatal error。正式训练过程中没有：
+
+- CUDA OOM；
+- NCCL tuner error；
+- `Traceback`；
+- NaN；
+- `video_decode_error`。
+
+出现但不影响训练的 warning：
+
+1. HuggingFace Hub 未认证 warning；本地缓存可用，未阻断加载；
+2. accelerate 对 `mixed_precision`、`dynamo_backend` 使用默认值的提示；
+3. DDP `find_unused_parameters=True` 性能提示；
+4. base checkpoint 缺少 WAN key 的提示；WAN 从独立 `Wan2.2-TI2V-5B` 路径加载，
+   且 WAN DiT 按配置冻结；
+5. PyArrow `promote` FutureWarning；
+6. HuggingFace Hub extras warning。
+
+### 3.4 文件、目录和配置变更清单
+
+| 路径 | 操作 | 原因 |
+|---|---|---|
+| `b/d/p/reprd_rbtwn_pikDulBtlLOG.md` | 新增并持续追加 | 按发生顺序保存本次完整执行记录 |
+| `/B/VENV/itnvla15rbt20` | 执行 `pip install -e /B/SRC/InternVLA-A-series` | 确保指定 venv 使用当前 checkout |
+| `/B/Dta/RoboTwin-Clean/pick_dual_bottles_lrb3` | 重新生成 v3.0 转换结果 | 本次准备命令未设置 `SKIP_CONVERT=1`；源目录仍未修改 |
+| `/B/VENV/itnvla15rbt20/var/hf_home/lerobot/robotwin/pick_dual_bottles` | 更新 symlink | 使 `robotwin/pick_dual_bottles` 解析到 v3.0 数据 |
+| `/B/VENV/itnvla15rbt20/var/hf_home/lerobot/stats/aloha/abs/agg_1repos_59c5e8f4cd/stats.json` | 新增/重算 | 为 abs 训练提供 external stats |
+| `/B/Ckp/itnVla_2608280746/rbt2/pick_dual_bottles/` | 新增冒烟产物 | 验证 4-step 训练和 checkpoint 写入 |
+| `/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/` | 新增正式训练产物 | 保存正式日志、wandb、训练状态和四个 checkpoint |
+
+本次没有修改仓库中的 Python、Shell 训练实现；使用了已有的通用入口：
+
+```text
+launch/internvla_a15_prepare_robotwin.sh
+launch/internvla_a15_finetune_robotwin_comm.sh
+launch/internvla_a15_robotwin_common.sh
+```
+
+### 3.5 关键产物路径
+
+```text
+训练日志：
+/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/train_2608280751.log
+
+运行参数：
+/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/run_2608280751.env
+
+最终权重：
+/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/003640/pretrained_model/
+
+稳定链接：
+/B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles/ckpt_2608280751/checkpoints/last/pretrained_model/
+```
+
+### 3.6 结论
+
+`pick_dual_bottles` 已按手册完成 76 epoch、3640 step 的正式微调训练。
+训练数据、external stats、四个阶段 checkpoint、最终权重和运行日志均已生成并通过校验。
+RoboTwin closed-loop 评测尚未执行，若需要评测，应按操作手册第 10 节使用 task index 19。
+
+## 4. 训练结束后的归档与 GPU 释放
+
+### 4.1 成功状态复核
+
+2026-08-28 17:16（UTC+8）再次复核：
+
+```text
+训练日志：包含 End of training
+训练进程：不存在
+GPU：8 张 H200 均为 0 MiB used、0% utilization
+输出目录大小：61G
+```
+
+因此按成功分支归档，不执行错误目录归档。
+
+### 4.2 成功产物上传
+
+目标 bucket：
+
+```text
+gs://physical-ai-data-eu/VENV/tmp/Rbt2PikDulBtl0828/
+```
+
+上传对象为整个训练输出目录（包含训练日志、运行参数、WandB offline 数据、
+全部 checkpoint 和 training state）：
+
+```bash
+gsutil -m cp -r \
+  /B/Ckp/itnVla_2608280751/rbt2/pick_dual_bottles \
+  gs://physical-ai-data-eu/VENV/tmp/Rbt2PikDulBtl0828/
+```
+
+上传状态：成功。云端成功列出 47 个文件，包含 60.1 GiB 训练产物。
+
+### 4.3 GPU 清理与显存填充
+
+归档完成后复查无训练进程，8 张 GPU 均为 0 MiB used。随后清理可见 CUDA
+compute 进程并启动：
+
+```bash
+source /B/VENV/itnvla15rbt20/bin/activate
+python /B/SRC/InternVLA-A-series/b/d/rbt/fill_8gpu_vram.py
+```
+
+首次启动和一次直接重启均因 PyTorch 多线程 CUDA Graph 初始化报错退出：
+
+```text
+CUDA error: operation not permitted when stream is capturing
+CUDA error: operation failed due to a previous error during capture
+```
+
+根因为该辅助脚本在多卡并发初始化时，部分 CUDA stream capture 不被当前
+PyTorch/CUDA 组合接受，并非训练产物或训练进程错误。已修改
+`b/d/rbt/fill_8gpu_vram.py`：捕获该特定 RuntimeError 后回退到普通
+bf16 matmul，同时保留显存 holder。
+
+修复后再次启动成功，单一 Python 进程已在 8 张 H200 上分别占用约
+102586 MiB（约 71.7% 显存）；日志显示 `GPU VRAM + compute held (low CPU)`。
+采样时个别 GPU 利用率为 0% 是脚本 70%--90% 随机 duty cycle 的正常空闲窗口。

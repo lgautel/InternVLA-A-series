@@ -122,18 +122,28 @@ def _capture_matmul_graph(
     b: torch.Tensor,
     out: torch.Tensor,
     device: torch.device,
-) -> torch.cuda.CUDAGraph:
+) -> torch.cuda.CUDAGraph | None:
     stream = torch.cuda.Stream(device=device)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream):
-        for _ in range(4):
-            torch.matmul(a, b, out=out)
-        torch.cuda.synchronize(device)
-        with torch.cuda.graph(graph, stream=stream):
-            # Batch several GEMMs per replay to reduce host wakeups and CPU
-            # overhead while the compute phase is active.
+    try:
+        with torch.cuda.stream(stream):
             for _ in range(4):
                 torch.matmul(a, b, out=out)
+            torch.cuda.synchronize(device)
+            with torch.cuda.graph(graph, stream=stream):
+                # Batch several GEMMs per replay to reduce host wakeups and CPU
+                # overhead while the compute phase is active.
+                for _ in range(4):
+                    torch.matmul(a, b, out=out)
+    except RuntimeError as exc:
+        if "stream is capturing" not in str(exc).lower():
+            raise
+        # Some CUDA/PyTorch combinations reject graph capture when several
+        # devices initialize concurrently. Keep the VRAM holder and fall back
+        # to ordinary GEMMs so the utility still provides its intended load.
+        torch.cuda.synchronize(device)
+        print(f"[cuda:{device.index}] cudagraph unavailable; using regular matmul", flush=True)
+        return None
     return graph
 
 
@@ -235,7 +245,11 @@ def _gpu_worker(
                 continue
 
             if now < active_until:
-                graph.replay()
+                if graph is None:
+                    for _ in range(4):
+                        torch.matmul(a, b, out=out)
+                else:
+                    graph.replay()
                 completion_event.record()
                 completion_event.synchronize()
             else:
