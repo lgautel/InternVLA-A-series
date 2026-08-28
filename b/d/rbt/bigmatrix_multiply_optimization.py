@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""Randomly hold 70-90% VRAM and SM utilization on every visible CUDA device.
-
-Designed for 8x NVIDIA A800-SXM4-80GB. Each GPU thread:
-1) reserves bf16 GEMM buffers for sustained compute;
-2) fills remaining budget with resident tensors;
-3) changes the resident-tensor budget roughly every 15 minutes;
-4) changes the compute duty cycle roughly every 18 minutes;
-5) replays a captured CUDA Graph with blocking CUDA-Event waits and short duty-cycle
-   windows so the host barely spins.
-"""
 
 from __future__ import annotations
 
@@ -122,18 +112,28 @@ def _capture_matmul_graph(
     b: torch.Tensor,
     out: torch.Tensor,
     device: torch.device,
-) -> torch.cuda.CUDAGraph:
+) -> torch.cuda.CUDAGraph | None:
     stream = torch.cuda.Stream(device=device)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream):
-        for _ in range(4):
-            torch.matmul(a, b, out=out)
-        torch.cuda.synchronize(device)
-        with torch.cuda.graph(graph, stream=stream):
-            # Batch several GEMMs per replay to reduce host wakeups and CPU
-            # overhead while the compute phase is active.
+    try:
+        with torch.cuda.stream(stream):
             for _ in range(4):
                 torch.matmul(a, b, out=out)
+            torch.cuda.synchronize(device)
+            with torch.cuda.graph(graph, stream=stream):
+                # Batch several GEMMs per replay to reduce host wakeups and CPU
+                # overhead while the compute phase is active.
+                for _ in range(4):
+                    torch.matmul(a, b, out=out)
+    except RuntimeError as exc:
+        if "stream is capturing" not in str(exc).lower():
+            raise
+        # Some CUDA/PyTorch combinations reject graph capture when several
+        # devices initialize concurrently. Keep the VRAM holder and fall back
+        # to ordinary GEMMs so the utility still provides its intended load.
+        torch.cuda.synchronize(device)
+        print(f"[cuda:{device.index}] cudagraph unavailable; using regular matmul", flush=True)
+        return None
     return graph
 
 
@@ -235,7 +235,11 @@ def _gpu_worker(
                 continue
 
             if now < active_until:
-                graph.replay()
+                if graph is None:
+                    for _ in range(4):
+                        torch.matmul(a, b, out=out)
+                else:
+                    graph.replay()
                 completion_event.record()
                 completion_event.synchronize()
             else:
