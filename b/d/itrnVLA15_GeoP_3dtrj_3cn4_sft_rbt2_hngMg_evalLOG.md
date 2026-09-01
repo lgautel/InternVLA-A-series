@@ -43,15 +43,17 @@
 | 2026-08-26 11:16:33 | 冒烟 2 ep demo_clean | OK exit=0 0S/2F/2mp4 log=/home/luogang/SRC/Robot/itvlaGp/outputs/logs/smoke_itvlaGp_hngMg_p2_010k.log |
 | 2026-08-26 11:16:33 | 启动 demo_clean GPU0 100 ep | ... |
 | 2026-08-26 11:16:33 | 启动 demo_randomized GPU1 100 ep | ... |
-| 2026-08-26 14:21:38 | demo_clean 100 ep | OK 9/100 = 9.0% |
-| 2026-08-26 15:10:52 | demo_randomized 100 ep | OK 4/100 = 4.0% |
+| 2026-08-26 14:21:38 | demo_clean 100 ep | OK 9/100 = 9.0%@75.76 epoch |
+| 2026-08-26 15:10:52 | demo_randomized 100 ep | OK 4/100 = 4.0%@75.76 epoch |
 
 ## 最终结果 (2026-08-26 15:10:52)
 
 | 配置 | 成功 | 失败 | 总计 | Success Rate |
 |------|------|------|------|--------------|
-| **demo_clean** | 9 | 91 | 100 | **9.0%** |
-| **demo_randomized** | 4 | 96 | 100 | **4.0%** |
+| **demo_clean** | 9 | 91 | 100 | **9.0%@75.76** |
+| **demo_randomized** | 4 | 96 | 100 | **4.0%@75.76** |
+
+**epoch 计算**：训练数据 `total_frames=16889`，有效 `batch_size=128`，按训练脚本规则 `steps_per_epoch=ceil(16889/128)=132`；因此 checkpoint @10000 的实际训练 epoch 为 `10000/132=75.76`。
 
 **输出路径**:
 

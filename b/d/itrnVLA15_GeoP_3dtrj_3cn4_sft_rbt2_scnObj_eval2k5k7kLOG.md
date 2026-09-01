@@ -1,6 +1,6 @@
 # itvlaGp RoboTwin `scan_object` 多步 checkpoint 评估执行日志（@2500 / @5000 / @7500）
 
-> **目的**：在同一 GCS job 下，对比 scan_object Phase 2 训练 **第 2500 / 5000 / 7500 步** checkpoint 的 RoboTwin 2.0 成功率，与已完成的 @010000 结果（clean **36.0%** / randomized **37.0%**，见 [`itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_evalLOG.md`](itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_evalLOG.md)）对照。
+> **目的**：在同一 GCS job 下，对比 scan_object Phase 2 训练 **第 2500 / 5000 / 7500 步** checkpoint 的 RoboTwin 2.0 成功率，与已完成的 @010000 结果（clean **36.0%@149.25** / randomized **37.0%@149.25**，见 [`itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_evalLOG.md`](itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_evalLOG.md)）对照。
 >
 > **操作手册**：[`itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_eval.md`](itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_scnObj_eval.md)（§6.4.4 其它 checkpoint 步数）
 >
@@ -101,15 +101,15 @@ gcloud storage cp gs://physical-ai-data-eu/VENV/tmp/2026_08_26_07_15_45-itvlaGp_
 | 2026-08-27 08:42:07 | 冒烟 2 ep demo_clean | OK exit=0 0S/2F/2mp4 log=/home/luogang/SRC/Robot/itvlaGp/outputs/logs/smoke_itvlaGp_scnObj_p2_002500.log |
 | 2026-08-27 08:42:07 | 启动 demo_clean GPU0 100 ep | ... |
 | 2026-08-27 08:42:07 | 启动 demo_randomized GPU1 100 ep | ... |
-| 2026-08-27 11:14:13 | demo_clean 100 ep | OK 44/100 = 44.0% |
-| 2026-08-27 11:22:36 | demo_randomized 100 ep | OK 33/100 = 33.0% |
+| 2026-08-27 11:14:13 | demo_clean 100 ep | OK 44/100 = 44.0%@37.31 epoch |
+| 2026-08-27 11:22:36 | demo_randomized 100 ep | OK 33/100 = 33.0%@37.31 epoch |
 
 ## 最终结果 (2026-08-27 11:22:36)
 
 | 配置 | 成功 | 失败 | 总计 | Success Rate |
 |------|------|------|------|--------------|
-| **demo_clean** | 44 | 56 | 100 | **44.0%** |
-| **demo_randomized** | 33 | 67 | 100 | **33.0%** |
+| **demo_clean** | 44 | 56 | 100 | **44.0%@37.31** |
+| **demo_randomized** | 33 | 67 | 100 | **33.0%@37.31** |
 
 **输出路径**:
 
@@ -149,15 +149,15 @@ gcloud storage cp gs://physical-ai-data-eu/VENV/tmp/2026_08_26_07_15_45-itvlaGp_
 | 2026-08-27 11:27:53 | 冒烟 2 ep demo_clean | OK exit=0 1S/1F/2mp4 log=/home/luogang/SRC/Robot/itvlaGp/outputs/logs/smoke_itvlaGp_scnObj_p2_005k.log |
 | 2026-08-27 11:27:53 | 启动 demo_clean GPU0 100 ep | ... |
 | 2026-08-27 11:27:53 | 启动 demo_randomized GPU1 100 ep | ... |
-| 2026-08-27 13:57:13 | demo_clean 100 ep | OK 45/100 = 45.0% |
-| 2026-08-27 14:07:11 | demo_randomized 100 ep | OK 33/100 = 33.0% |
+| 2026-08-27 13:57:13 | demo_clean 100 ep | OK 45/100 = 45.0%@74.63 epoch |
+| 2026-08-27 14:07:11 | demo_randomized 100 ep | OK 33/100 = 33.0%@74.63 epoch |
 
 ## 最终结果 (2026-08-27 14:07:11)
 
 | 配置 | 成功 | 失败 | 总计 | Success Rate |
 |------|------|------|------|--------------|
-| **demo_clean** | 45 | 55 | 100 | **45.0%** |
-| **demo_randomized** | 33 | 67 | 100 | **33.0%** |
+| **demo_clean** | 45 | 55 | 100 | **45.0%@74.63** |
+| **demo_randomized** | 33 | 67 | 100 | **33.0%@74.63** |
 
 **输出路径**:
 
@@ -197,15 +197,15 @@ gcloud storage cp gs://physical-ai-data-eu/VENV/tmp/2026_08_26_07_15_45-itvlaGp_
 | 2026-08-27 14:13:11 | 冒烟 2 ep demo_clean | OK exit=0 0S/2F/2mp4 log=/home/luogang/SRC/Robot/itvlaGp/outputs/logs/smoke_itvlaGp_scnObj_p2_007500.log |
 | 2026-08-27 14:13:11 | 启动 demo_clean GPU0 100 ep | ... |
 | 2026-08-27 14:13:11 | 启动 demo_randomized GPU1 100 ep | ... |
-| 2026-08-27 16:42:47 | demo_clean 100 ep | OK 34/100 = 34.0% |
-| 2026-08-27 16:51:32 | demo_randomized 100 ep | OK 31/100 = 31.0% |
+| 2026-08-27 16:42:47 | demo_clean 100 ep | OK 34/100 = 34.0%@111.94 epoch |
+| 2026-08-27 16:51:32 | demo_randomized 100 ep | OK 31/100 = 31.0%@111.94 epoch |
 
 ## 最终结果 (2026-08-27 16:51:32)
 
 | 配置 | 成功 | 失败 | 总计 | Success Rate |
 |------|------|------|------|--------------|
-| **demo_clean** | 34 | 66 | 100 | **34.0%** |
-| **demo_randomized** | 31 | 69 | 100 | **31.0%** |
+| **demo_clean** | 34 | 66 | 100 | **34.0%@111.94** |
+| **demo_randomized** | 31 | 69 | 100 | **31.0%@111.94** |
 
 **输出路径**:
 
@@ -226,12 +226,14 @@ gcloud storage cp gs://physical-ai-data-eu/VENV/tmp/2026_08_26_07_15_45-itvlaGp_
 
 | ckpt-step | demo_clean | demo_randomized | 备注 |
 |:---:|:---:|:---:|:---|
-| **002500** | **44.0%** (44/100) | **33.0%** (33/100) | clean 最高 |
-| **005000** | **45.0%** (45/100) | **33.0%** (33/100) | clean 峰值 |
-| **007500** | **34.0%** (34/100) | **31.0%** (31/100) | 开始回落 |
-| **010000**（对照，见 evalLOG） | **36.0%** (36/100) | **37.0%** (37/100) | randomized 最高 |
+| **002500** | **44.0%@37.31** (44/100) | **33.0%@37.31** (33/100) | clean 最高 |
+| **005000** | **45.0%@74.63** (45/100) | **33.0%@74.63** (33/100) | clean 峰值 |
+| **007500** | **34.0%@111.94** (34/100) | **31.0%@111.94** (31/100) | 开始回落 |
+| **010000**（对照，见 evalLOG） | **36.0%@149.25** (36/100) | **37.0%@149.25** (37/100) | randomized 最高 |
 
 **简要结论**：
 - `demo_clean`：@5000 最佳（45%），@7500/@10000 降至 34–36%，与训练手册「@2500 后 open-loop MSE 可能变差」部分吻合，但仿真成功率在 @5000 仍优于 @10000。
 - `demo_randomized`：四步均在 **31–37%** 窄幅波动，@10000 的 37% 为最高，整体对步数不敏感。
 - 三步评测均无 error；问题记录节留空。
+
+**epoch 计算**：`total_frames=8463`，有效 `batch_size=128`，`steps_per_epoch=ceil(8463/128)=67`；各 checkpoint 的 epoch 为 @2500=`37.31`、@5000=`74.63`、@7500=`111.94`、@10000=`149.25`。

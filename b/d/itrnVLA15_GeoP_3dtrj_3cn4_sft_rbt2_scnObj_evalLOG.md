@@ -137,15 +137,17 @@ bash b/s/itrnVLA15_GeoP_3dtrj_3cn4_sft_rbt2_eval.sh --task-name scan_object --ta
 | 2026-08-27 03:01:15 | conda activate itvlaGp | OK /home/luogang/miniforge3/envs/itvlaGp/bin/python |
 | 2026-08-27 03:01:15 | 启动 demo_clean GPU0 100 ep | ... |
 | 2026-08-27 03:01:15 | 启动 demo_randomized GPU1 100 ep | ... |
-| 2026-08-27 05:29:17 | demo_clean 100 ep | OK 36/100 = 36.0% |
-| 2026-08-27 05:36:58 | demo_randomized 100 ep | OK 37/100 = 37.0% |
+| 2026-08-27 05:29:17 | demo_clean 100 ep | OK 36/100 = 36.0%@149.25 epoch |
+| 2026-08-27 05:36:58 | demo_randomized 100 ep | OK 37/100 = 37.0%@149.25 epoch |
 
 ## 最终结果 (2026-08-27 05:36:58)
 
 | 配置 | 成功 | 失败 | 总计 | Success Rate |
 |------|------|------|------|--------------|
-| **demo_clean** | 36 | 64 | 100 | **36.0%** |
-| **demo_randomized** | 37 | 63 | 100 | **37.0%** |
+| **demo_clean** | 36 | 64 | 100 | **36.0%@149.25** |
+| **demo_randomized** | 37 | 63 | 100 | **37.0%@149.25** |
+
+**epoch 计算**：训练数据 `total_frames=8463`，有效 `batch_size=128`，按训练脚本规则 `steps_per_epoch=ceil(8463/128)=67`；因此 checkpoint @10000 的实际训练 epoch 为 `10000/67=149.25`。
 
 **输出路径**:
 
