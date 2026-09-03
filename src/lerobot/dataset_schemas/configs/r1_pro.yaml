@@ -1,0 +1,54 @@
+# R1 Pro dual-arm mobile robot
+#
+# Torso is excluded: it is not commanded by the policy and is recorded as an
+# all-zero constant in the open0630 datasets. Chassis IS included -- the policy
+# drives the base velocity end-to-end for the door-opening task.
+#
+# State  concat order: left_arm(7) + right_arm(7) + left_gripper(1) + right_gripper(1) + chassis(9)  = 25
+# Action concat order: left_arm(7) + right_arm(7) + left_gripper(1) + right_gripper(1) + chassis(3)  = 19
+# Both reorder to the canonical layout: left_arm(7) left_gripper(1) right_arm(7) right_gripper(1) | chassis
+robot_type: r1_pro
+
+# Given in feature_mapping concat order (DeltaActionTransformFn runs before reorder).
+# Positive = delta action, negative = absolute action.
+# Chassis commands are velocities (already a rate), so they stay absolute.
+# Only consumed when action_mode="delta"; the abs pipeline drops DeltaActionTransformFn.
+action_mask_spec: [7, 7, -1, -1, -3]
+
+# [src_start, src_end, dst_start, dst_end]
+action_reorder:
+  - [0, 7, 0, 7]      # left_arm:       src[0:7]   -> dst[0:7]
+  - [14, 15, 7, 8]    # left_gripper:   src[14:15] -> dst[7:8]
+  - [7, 14, 8, 15]    # right_arm:      src[7:14]  -> dst[8:15]
+  - [15, 16, 15, 16]  # right_gripper:  src[15:16] -> dst[15:16]
+  - [16, 19, 16, 19]  # chassis vel:    src[16:19] -> dst[16:19]
+
+# Chassis state is 9-dim (cumulative yaw 3 + linear vel 3 + angular vel 3), so the
+# trailing entry differs from action_reorder. Do not copy one from the other.
+state_reorder:
+  - [0, 7, 0, 7]
+  - [14, 15, 7, 8]
+  - [7, 14, 8, 15]
+  - [15, 16, 15, 16]
+  - [16, 25, 16, 25]  # chassis: src[16:25] -> dst[16:25]
+
+feature_mapping:
+  observation.state:
+    - observation.state.left_arm        # [7]
+    - observation.state.right_arm       # [7]
+    - observation.state.left_gripper    # [1]
+    - observation.state.right_gripper   # [1]
+    - observation.state.chassis         # [9]
+  action:
+    - action.left_arm                   # [7]
+    - action.right_arm                  # [7]
+    - action.left_gripper               # [1]
+    - action.right_gripper              # [1]
+    - action.chassis.velocities         # [3]
+
+image_mapping:
+  observation.images.head_rgb: observation.images.image0
+  observation.images.wrist_left_rgb: observation.images.image1
+  observation.images.wrist_right_rgb: observation.images.image2
+
+description: "R1 Pro dual-arm mobile robot (arms + grippers + chassis, torso excluded)"

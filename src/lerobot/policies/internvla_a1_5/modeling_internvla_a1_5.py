@@ -2105,7 +2105,7 @@ class InternVLAA15(nn.Module):
 
         # WAN forward, chunked for the same memory reason as the VAE above.
         with torch.amp.autocast("cuda", dtype=wan_dtype):
-            video_pred = torch.cat(
+            video_pred = torch.cat( #@#??? 加输出 video_pred 这么一大段, 主要还是因为加了 video_micro_batch_size(micro_batch_size), 但为何要这样做?
                 [
                     self.wan_dit_forward(
                         noisy_latent[start : start + micro_batch_size],
