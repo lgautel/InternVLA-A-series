@@ -10,7 +10,7 @@ import argparse
 import json
 from pathlib import Path
 
-DERIVED_SUFFIXES = ("_kptsim_lrbv30", "_kptsim_lrb", "_kptsim")
+DERIVED_SUFFIXES = ("_lrb3_kptsim", "_kptsim_lrbv30", "_kptsim_lrb", "_kptsim", "_lrb3")
 
 
 def is_derived_name(name: str) -> bool:
