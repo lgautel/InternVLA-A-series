@@ -1,0 +1,13 @@
+robot_type: franka_plug
+action_mask_spec: [7, -1]
+# [7, -1] 含义: 前 7 维 (arm joints) 在 delta 模式下做差分, 最后 1 维 (gripper) 保持绝对值
+feature_mapping:
+  observation.state:
+    - observation.state.arm
+    - observation.state.gripper
+  action:
+    - action.arm
+    - action.gripper
+image_mapping:
+  observation.images.global: observation.images.image0
+  observation.images.wrist: observation.images.image1

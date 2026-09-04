@@ -188,4 +188,4 @@ export_internvla_a15_checkpoint.py
 ckpt/
 ckpts/
 outputs-*
-.vscode
+.vscode/
