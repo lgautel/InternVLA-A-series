@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""Randomly hold 70-90% VRAM and SM utilization on every visible CUDA device.
+
+Designed for 8x NVIDIA A800-SXM4-80GB (also works on 2x RTX PRO 6000 Blackwell, etc.).
+Automatically adapts to the number of visible GPUs and their VRAM size.
+
+Each GPU thread:
+1) reserves bf16 GEMM buffers for sustained compute;
+2) fills remaining budget with resident tensors;
+3) changes the resident-tensor budget roughly every 15 minutes;
+4) changes the compute duty cycle roughly every 18 minutes;
+5) replays a captured CUDA Graph with blocking CUDA-Event waits and short duty-cycle
+   windows so the host barely spins.
+
+Background run (survives terminal/IDE close):
+    nohup python -u b/d/GpRbt/bigmatrix_multiply_optimization.py > /tmp/bigmatrix_multiply_optimization.log 2>&1 &
+    disown
+  Use the conda env's Python directly (not `conda run`) to avoid stdout buffering.
+  Check log:  tail -f /tmp/bigmatrix_multiply_optimization.log
+  Stop:       kill $(pgrep -f bigmatrix_multiply_optimization)
+"""
 
 from __future__ import annotations
 
