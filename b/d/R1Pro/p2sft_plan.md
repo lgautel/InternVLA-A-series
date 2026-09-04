@@ -611,11 +611,11 @@ def _kpt_fields_passthrough_or_zero(
     def _kpt_split_loss(self, pred: torch.Tensor, gt: torch.Tensor, reduce_dims: tuple[int, ...]) -> torch.Tensor:
         """Compute position + weighted rotation MSE for E1 7D keypoints.
 
-        When keypoint_track_input_dim <= 3, falls back to plain MSE (no split).
+        When kpt_4d_mode is "pos_only", falls back to plain MSE (no split).
         """
         kpt_dim = self.config.keypoint_track_input_dim
         gt = gt.to(torch.float32)
-        if kpt_dim > 3:
+        if self.config.kpt_4d_mode == "pos_rot":
             loss_pos = F.mse_loss(pred[..., :3], gt[..., :3], reduction="none").mean(dim=reduce_dims)
             pred_rot = F.normalize(pred[..., 3:kpt_dim], p=2, dim=-1)
             loss_rot = F.mse_loss(pred_rot, gt[..., 3:kpt_dim], reduction="none").mean(dim=reduce_dims)
@@ -626,7 +626,7 @@ def _kpt_fields_passthrough_or_zero(
 **为什么提取 helper**: 当前帧 loss 和未来帧 loss 的分离逻辑完全相同，仅 `reduce_dims` 不同。提取后：
 - 避免 ~20 行重复代码
 - 后续修改旋转 loss（如从 MSE 换为 geodesic distance）只需改一处
-- 向后兼容：`kpt_dim <= 3` 时直接走纯 MSE
+- 向后兼容：`kpt_4d_mode == "pos_only"` 时直接走纯 MSE
 
 ---
 
@@ -1214,7 +1214,7 @@ $$
 \mathcal{L} = 10 \cdot \mathcal{L}_{action} + \mathcal{L}_{vqa/fast} + \mathcal{L}_{video} + 1.0 \cdot \left(\mathcal{L}_{kpt}^{cur} + 1.5 \cdot \mathcal{L}_{kpt}^{fut}\right)
 $$
 
-其中当 `keypoint_track_input_dim > 3` 时（E1 7D 方案），$\mathcal{L}_{kpt}^{cur}$ 和 $\mathcal{L}_{kpt}^{fut}$ 由 `_kpt_split_loss` 分离计算位置 MSE 和旋转 MSE：
+其中当 `kpt_4d_mode == "pos_rot"` 时（E1 7D 方案），$\mathcal{L}_{kpt}^{cur}$ 和 $\mathcal{L}_{kpt}^{fut}$ 由 `_kpt_split_loss` 分离计算位置 MSE 和旋转 MSE：
 
 $$
 \mathcal{L}_{kpt} = \mathcal{L}_{pos} + \lambda_{rot} \cdot \mathcal{L}_{rot}, \quad \lambda_{rot} = \text{kpt\_rot\_loss\_weight} = 1.0

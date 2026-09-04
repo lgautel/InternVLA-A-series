@@ -1017,7 +1017,7 @@ class InternVLAA15(nn.Module):
             )
             self.kpt_state_proj = nn.Linear(config.max_state_dim, kpt_hidden_size)
             self.keypoint_embedding = nn.Embedding(j, kpt_hidden_size)
-            self.keypoint_out_proj = nn.Linear(kpt_hidden_size, 3)
+            self.keypoint_out_proj = nn.Linear(kpt_hidden_size, config.keypoint_track_input_dim)
             # Sinusoidal position embedding indexed by (future_step - current_step - 1) in
             # [0, chunk_size), added onto the current-frame keypoint token to predict the
             # future-frame keypoints (mirrors GeoPredict's `future_pos`, see design doc §5.2).
@@ -1594,7 +1594,7 @@ class InternVLAA15(nn.Module):
         att_masks += [1]
 
         if his_kpts is None or his_len is None:
-            his_kpts = torch.zeros(bsize, self.config.keypoint_history_max_len, j, 3, device=device)
+            his_kpts = torch.zeros(bsize, self.config.keypoint_history_max_len, j, self.config.keypoint_track_input_dim, device=device)
             his_len = torch.zeros(bsize, dtype=torch.long, device=device)
         his_kpts = his_kpts.to(dtype)
         hist_kpt_emb = self._apply_checkpoint(
@@ -1951,14 +1951,13 @@ class InternVLAA15(nn.Module):
         # must be excluded from the mean) exactly like it already does for loss_action/loss_vqa.
         if use_kpt:
             j = self.config.num_keypoint_joints
+            kpt_dim = self.config.keypoint_track_input_dim
             kpt_query_out = self.get_keypoint_token_output(kpt_out).to(dtype=torch.float32)  # [B, J, D]
-            pred_kpt_current = self.keypoint_out_proj(kpt_query_out)  # [B, J, 3]
+            pred_kpt_current = self.keypoint_out_proj(kpt_query_out)  # [B, J, kpt_dim]
 
             if kpt_t is None:
-                kpt_t = torch.zeros(B, j, 3, device=actions.device, dtype=torch.float32)
-            loss_kpt_current = F.mse_loss(
-                pred_kpt_current, kpt_t.to(torch.float32), reduction="none"
-            ).mean(dim=(-1, -2))  # [B]
+                kpt_t = torch.zeros(B, j, kpt_dim, device=actions.device, dtype=torch.float32)
+            loss_kpt_current = self._kpt_split_loss(pred_kpt_current, kpt_t, reduce_dims=(-1, -2))  # [B]
 
             chunk_size = self.config.chunk_size
             future_pos = self.future_kpt_pos_embed.to(
@@ -1967,13 +1966,11 @@ class InternVLAA15(nn.Module):
             future_kpt_tokens = kpt_query_out.unsqueeze(1) + future_pos[None, :, None, :]  # [B, C, J, D]
             future_kpt_pred = self.keypoint_out_proj(
                 future_kpt_tokens.reshape(B * chunk_size, j, -1)
-            ).reshape(B, chunk_size, j, 3)
+            ).reshape(B, chunk_size, j, kpt_dim)
 
             if kpt_future is None:
-                kpt_future = torch.zeros(B, chunk_size, j, 3, device=actions.device, dtype=torch.float32)
-            loss_kpt_future = F.mse_loss(
-                future_kpt_pred, kpt_future.to(torch.float32), reduction="none"
-            ).mean(dim=(-1, -2, -3))  # [B]
+                kpt_future = torch.zeros(B, chunk_size, j, kpt_dim, device=actions.device, dtype=torch.float32)
+            loss_kpt_future = self._kpt_split_loss(future_kpt_pred, kpt_future, reduce_dims=(-1, -2, -3))  # [B]
         else:
             loss_kpt_current = torch.zeros(B, device=actions.device, dtype=torch.float32)
             loss_kpt_future = torch.zeros(B, device=actions.device, dtype=torch.float32)
@@ -1983,6 +1980,16 @@ class InternVLAA15(nn.Module):
     # ------------------------------------------------------------------
     # WAN DiT forward (cross-attention conditioning)
     # ------------------------------------------------------------------
+
+    def _kpt_split_loss(self, pred: torch.Tensor, gt: torch.Tensor, reduce_dims: tuple[int, ...]) -> torch.Tensor:
+        kpt_dim = self.config.keypoint_track_input_dim
+        gt = gt.to(torch.float32)
+        if self.config.kpt_4d_mode == "pos_rot":
+            loss_pos = F.mse_loss(pred[..., :3], gt[..., :3], reduction="none").mean(dim=reduce_dims)
+            pred_rot = F.normalize(pred[..., 3:kpt_dim], p=2, dim=-1)
+            loss_rot = F.mse_loss(pred_rot, gt[..., 3:kpt_dim], reduction="none").mean(dim=reduce_dims)
+            return loss_pos + self.config.kpt_rot_loss_weight * loss_rot
+        return F.mse_loss(pred, gt, reduction="none").mean(dim=reduce_dims)
 
     def wan_dit_forward(
         self,

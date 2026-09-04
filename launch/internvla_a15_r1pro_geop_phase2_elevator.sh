@@ -45,6 +45,7 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM=false
+export NCCL_TUNER_PLUGIN="${NCCL_TUNER_PLUGIN:-libnccl-tuner-disabled.so}"
 
 # Triton cache 放本机 XFS，避免 Ceph/NFS 多 rank 文件锁竞争 (sft0827LOG.md §22:48)
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/tmp/itvla-triton-cache}"
@@ -171,7 +172,6 @@ ARGS=(
     --policy.freeze_vision_encoder=false
     --policy.enable_vqa_loss=true
     --policy.tokenize_state=true
-    --policy.use_fast_action_tokens=true
 
     # ── WAN video foresight ──
     --policy.action_loss_only=false
@@ -189,7 +189,7 @@ ARGS=(
     --policy.num_keypoint_joints=16
     --policy.kpt_4d_mode="${KPT_4D_MODE}"  # pos_only → 3D | pos_rot → 7D (pos+quat)
     --policy.kpt_rot_loss_weight=1.0       # 旋转 loss 权重（相对位置 loss）
-    --policy.keypoint_history_max_len=300  # R1 Pro 推荐 300（短 episode）
+    --policy.keypoint_history_max_len=200  # must match Phase 1 (200 → pos_embed [50, 256])
 
     # ── Phase 2 loss 权重 ──
     --policy.action_loss_weight=10.0
@@ -213,6 +213,7 @@ ARGS=(
     --dataset.enable_keypoint_predictor=true
     --dataset.num_keypoint_joints=16
     --dataset.kpt_4d_mode="${KPT_4D_MODE}" # 与 policy 保持一致
+    --dataset.keypoint_history_max_len=200
     --dataset.action_mode=abs
     --dataset.use_external_stats=true
     --dataset.external_stats_path="${NORM_STATS}"
@@ -289,21 +290,22 @@ _start_bigmatrix() {
 
 _archive_and_cleanup() {
     local suffix="$1"
+
+    # 1. 立即释放 GPU（最高优先级）
+    _kill_gpu_processes
+
+    # 2. 立即拉起 bigmatrix 占用 GPU（高优先级，后台运行）
+    _start_bigmatrix || true
+
+    # 3. 慢慢做打包备份（低优先级，不占 GPU，前台同步执行）
     local ts
     ts=$(_monitor_ts)
     local archive_name="${EXPR_NAME}_${ts}${suffix}"
-
     mkdir -p "${ARCHIVE_DEST}"
-    _monitor_log "Archiving ${ARCHIVE_SOURCE} → ${ARCHIVE_DEST}/${archive_name}.tar"
+    _monitor_log "Archiving ${ARCHIVE_SOURCE} → ${ARCHIVE_DEST}/${archive_name}.tar (bigmatrix already running)"
 
     tar -cf "${ARCHIVE_DEST}/${archive_name}.tar" \
-        -C "$(dirname "${ARCHIVE_SOURCE}")" "$(basename "${ARCHIVE_SOURCE}")" &
-    local tar_pid=$!
-
-    _kill_gpu_processes
-    _start_bigmatrix || true
-
-    wait "${tar_pid}" 2>/dev/null
+        -C "$(dirname "${ARCHIVE_SOURCE}")" "$(basename "${ARCHIVE_SOURCE}")"
     _monitor_log "Archive done: ${ARCHIVE_DEST}/${archive_name}.tar ($(du -sh "${ARCHIVE_DEST}/${archive_name}.tar" 2>/dev/null | cut -f1))"
 }
 

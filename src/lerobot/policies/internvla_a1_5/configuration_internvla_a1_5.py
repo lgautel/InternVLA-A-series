@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 from lerobot.configs.default import DatasetConfig, VQADatasetConfig
 from lerobot.configs.policies import PreTrainedConfig
@@ -38,6 +38,8 @@ class InternVLAA15DatasetConfig(DatasetConfig):
     enable_keypoint_predictor: bool = False
     num_keypoint_joints: int = 8
     keypoint_history_max_len: int = 1000
+    kpt_4d_mode: str = "pos_only"
+    keypoint_dim: int = 3  # auto-derived from kpt_4d_mode
 
     data_transforms: TransformGroup = field(
         default_factory=lambda: TransformGroup(
@@ -71,6 +73,11 @@ class InternVLAA15DatasetConfig(DatasetConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        _KPT_4D_DIM = {"pos_only": 3, "pos_rot": 7}
+        if self.kpt_4d_mode not in _KPT_4D_DIM:
+            raise ValueError(f"Unsupported kpt_4d_mode={self.kpt_4d_mode!r}")
+        self.keypoint_dim = _KPT_4D_DIM[self.kpt_4d_mode]
+
         inputs = list(self.data_transforms.inputs)
         has_delta = any(isinstance(t, DeltaActionTransformFn) for t in inputs)
         if self.action_mode == "delta" and not has_delta:
@@ -111,6 +118,7 @@ class InternVLAA15DatasetConfig(DatasetConfig):
                 num_joints=self.num_keypoint_joints,
                 history_max_len=self.keypoint_history_max_len,
                 chunk_size=self.chunk_size,
+                keypoint_dim=self.keypoint_dim,
             )
             # Insert right after NormalizeTransformFn (and before ComposeFieldsTransform), per
             # v3.2 §4.4: the raw stacked `observation.keypoint_3d` delta window must still be
@@ -128,6 +136,7 @@ class InternVLAA15DatasetConfig(DatasetConfig):
                 t.num_keypoint_joints = self.num_keypoint_joints
                 t.keypoint_history_max_len = self.keypoint_history_max_len
                 t.chunk_size = self.chunk_size
+                t.keypoint_dim = self.keypoint_dim
                 break
 
         self.data_transforms = replace(self.data_transforms, inputs=inputs)
@@ -153,6 +162,7 @@ class UnifyInternVLAA15InputsTransformFn(DataTransformFn):
     num_keypoint_joints: int = 8
     keypoint_history_max_len: int = 1000
     chunk_size: int = 50
+    keypoint_dim: int = 3
 
     def __call__(self, data: DataDict) -> DataDict:
         from lerobot.utils.constants import OBS_STATE, ACTION, OBS_STR
@@ -188,23 +198,23 @@ class UnifyInternVLAA15InputsTransformFn(DataTransformFn):
             video_key: video_frames,
         }
         if self.enable_keypoint_predictor:
-            result.update(_kpt_fields_passthrough_or_zero(data, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size))
+            result.update(_kpt_fields_passthrough_or_zero(data, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size, self.keypoint_dim))
         return result
 
 
 def _kpt_fields_passthrough_or_zero(
-    data: DataDict, num_joints: int, history_max_len: int, chunk_size: int
+    data: DataDict, num_joints: int, history_max_len: int, chunk_size: int, keypoint_dim: int = 3
 ) -> DataDict:
     """Return the 5 GeoPredict kpt fields, passed through from `data` if present, otherwise
     zero-filled with `kpt_mask=False` (used for VQA samples, which never have 3D keypoints)."""
     import torch
 
-    h, j, c = history_max_len, num_joints, chunk_size
+    h, j, c, d = history_max_len, num_joints, chunk_size, keypoint_dim
     return {
-        "observation.his_kpts": data.get("observation.his_kpts", torch.zeros(h, j, 3)),
+        "observation.his_kpts": data.get("observation.his_kpts", torch.zeros(h, j, d)),
         "observation.his_len": data.get("observation.his_len", torch.tensor(0, dtype=torch.long)),
-        "observation.kpt_t": data.get("observation.kpt_t", torch.zeros(j, 3)),
-        "observation.kpt_future": data.get("observation.kpt_future", torch.zeros(c, j, 3)),
+        "observation.kpt_t": data.get("observation.kpt_t", torch.zeros(j, d)),
+        "observation.kpt_future": data.get("observation.kpt_future", torch.zeros(c, j, d)),
         "observation.kpt_mask": data.get("observation.kpt_mask", torch.tensor(False)),
     }
 
@@ -228,6 +238,7 @@ class UnifyInternVLAA15VQAInputsTransformFn(DataTransformFn):
     num_keypoint_joints: int = 8
     keypoint_history_max_len: int = 1000
     chunk_size: int = 50
+    keypoint_dim: int = 3
 
     def __call__(self, data: DataDict) -> DataDict:
         from lerobot.utils.constants import OBS_STATE, ACTION, OBS_STR
@@ -261,7 +272,7 @@ class UnifyInternVLAA15VQAInputsTransformFn(DataTransformFn):
         if self.enable_keypoint_predictor:
             result.update(
                 _kpt_fields_passthrough_or_zero(
-                    {}, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size
+                    {}, self.num_keypoint_joints, self.keypoint_history_max_len, self.chunk_size, self.keypoint_dim
                 )
             )
         return result
@@ -286,11 +297,13 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
     num_keypoint_joints: int = 8
     keypoint_history_max_len: int = 1000
     chunk_size: int = 50
+    kpt_4d_mode: str = "pos_only"
+    keypoint_dim: int = 3
 
     data_transforms: TransformGroup = field(
         default_factory=lambda: TransformGroup(
             inputs=[
-                # Note: If you resize the VQA images, the coordinates in the VQA Data should be scaled accordingly. 
+                # Note: If you resize the VQA images, the coordinates in the VQA Data should be scaled accordingly.
                 # Please pre-process the VQA data offline based on its format.
                 ResizeVQAImagesWithPadFn(
                     height=InternVLAA15VQADatasetConfig.height,
@@ -312,6 +325,11 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
     )
 
     def __post_init__(self):
+        _KPT_4D_DIM = {"pos_only": 3, "pos_rot": 7}
+        if self.kpt_4d_mode not in _KPT_4D_DIM:
+            raise ValueError(f"Unsupported kpt_4d_mode={self.kpt_4d_mode!r}")
+        self.keypoint_dim = _KPT_4D_DIM[self.kpt_4d_mode]
+
         inputs = list(self.data_transforms.inputs)
         processor_type = InternVLAA15VQAProcessorTransformFn
         inputs = [t for t in inputs if not isinstance(t, processor_type)]
@@ -331,6 +349,7 @@ class InternVLAA15VQADatasetConfig(VQADatasetConfig):
                 t.num_keypoint_joints = self.num_keypoint_joints
                 t.keypoint_history_max_len = self.keypoint_history_max_len
                 t.chunk_size = self.chunk_size
+                t.keypoint_dim = self.keypoint_dim
                 break
 
         self.data_transforms = replace(self.data_transforms, inputs=inputs)
@@ -479,10 +498,17 @@ class InternVLAA15Config(PreTrainedConfig):
     keypoint_track_ff_dim: int = 1024
     keypoint_history_max_len: int = 1000  # H: max number of history frames fed to TrackEncoder
 
+    kpt_4d_mode: str = "pos_only"  # "pos_only" (3D) or "pos_rot" (7D)
+    kpt_rot_loss_weight: float = 1.0  # rotation MSE weight (pos_rot only)
     keypoint_noise_sigma: float = 0.0  # optional additive Gaussian noise on kpt_t during training (0=disabled)
+
+    _KPT_4D_DIM: ClassVar[dict[str, int]] = {"pos_only": 3, "pos_rot": 7}
 
     def __post_init__(self):
         super().__post_init__()
+        if self.kpt_4d_mode not in self._KPT_4D_DIM:
+            raise ValueError(f"Unsupported kpt_4d_mode={self.kpt_4d_mode!r}, expected {list(self._KPT_4D_DIM)}")
+        self.keypoint_track_input_dim = self._KPT_4D_DIM[self.kpt_4d_mode]
 
         if self.n_action_steps > self.chunk_size:
             raise ValueError(

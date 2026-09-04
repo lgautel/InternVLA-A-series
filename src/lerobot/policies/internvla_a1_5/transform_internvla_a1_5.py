@@ -688,23 +688,24 @@ class Extract3DKeypointTransformFn(DataTransformFn):
     num_joints: int = 8
     history_max_len: int = 1000
     chunk_size: int = 50
+    keypoint_dim: int = 3
 
     def __call__(self, data: DataDict) -> DataDict:
-        h, j, c = self.history_max_len, self.num_joints, self.chunk_size
+        h, j, c, d = self.history_max_len, self.num_joints, self.chunk_size, self.keypoint_dim
         key = "observation.keypoint_3d"
 
         if key not in data:
-            data["observation.his_kpts"] = torch.zeros(h, j, 3)
+            data["observation.his_kpts"] = torch.zeros(h, j, d)
             data["observation.his_len"] = torch.tensor(0, dtype=torch.long)
-            data["observation.kpt_t"] = torch.zeros(j, 3)
-            data["observation.kpt_future"] = torch.zeros(c, j, 3)
+            data["observation.kpt_t"] = torch.zeros(j, d)
+            data["observation.kpt_future"] = torch.zeros(c, j, d)
             data["observation.kpt_mask"] = torch.tensor(False)
             return data
 
         stacked = data.pop(key)
         if isinstance(stacked, np.ndarray):
             stacked = torch.from_numpy(stacked)
-        stacked = stacked.reshape(h + 1 + c, j, 3).float()
+        stacked = stacked.reshape(h + 1 + c, j, d).float()
 
         is_pad = data.pop(f"{key}_is_pad", None)
         if is_pad is None:
@@ -712,12 +713,12 @@ class Extract3DKeypointTransformFn(DataTransformFn):
         elif isinstance(is_pad, np.ndarray):
             is_pad = torch.from_numpy(is_pad)
 
-        hist_window = stacked[:h]  # [H, J, 3], relative offsets [-H, ..., -1], ascending chronological
+        hist_window = stacked[:h]
         hist_is_pad = is_pad[:h].bool()
         num_invalid = int(hist_is_pad.sum().item())
         his_len = h - num_invalid
 
-        his_kpts = torch.zeros(h, j, 3, dtype=stacked.dtype)
+        his_kpts = torch.zeros(h, j, d, dtype=stacked.dtype)
         if his_len > 0:
             # Invalid (clamped-to-episode-start) frames are contiguous at the FRONT of
             # `hist_window` because they correspond to the most-negative (out-of-range) offsets.
