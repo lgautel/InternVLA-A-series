@@ -19,11 +19,11 @@ import math
 from pathlib import Path
 
 
-def checkpoint_epochs(total_epochs: int) -> list[int]:
+def checkpoint_epochs(total_epochs: int, save_every: int = 0) -> list[int]:
     """Epoch indices (1-based) at which checkpoints are saved, always including total_epochs."""
     if total_epochs <= 0:
         raise ValueError("total_epochs must be > 0")
-    every = max(total_epochs // 4, 1)
+    every = save_every if save_every > 0 else max(total_epochs // 4, 1)
     epochs: list[int] = []
     e = every
     while e < total_epochs:
@@ -35,16 +35,16 @@ def checkpoint_epochs(total_epochs: int) -> list[int]:
 
 
 def quarter_epoch_save_freq(
-    steps: int, steps_per_epoch: int, epochs: int
+    steps: int, steps_per_epoch: int, epochs: int, save_every: int = 0
 ) -> tuple[int, int, list[int], list[int]]:
     """Return (save_every_epochs, save_freq, save_steps, save_at_epochs)."""
     if steps <= 0:
         raise ValueError("steps must be > 0")
     if steps_per_epoch <= 0:
         raise ValueError("steps_per_epoch must be > 0")
-    save_every_epochs = max(epochs // 4, 1)
+    save_every_epochs = save_every if save_every > 0 else max(epochs // 4, 1)
     save_freq = max(steps_per_epoch * save_every_epochs, 1)
-    save_at_epochs = checkpoint_epochs(epochs)
+    save_at_epochs = checkpoint_epochs(epochs, save_every)
     save_steps: list[int] = []
     for ep in save_at_epochs:
         if ep == epochs:
@@ -69,6 +69,7 @@ def compute_schedule(
     n_gpus: int,
     batch_size: int,
     n_nodes: int = 1,
+    save_every: int = 0,
 ) -> dict:
     effective_batch = n_gpus * batch_size * n_nodes
     if effective_batch <= 0:
@@ -78,7 +79,7 @@ def compute_schedule(
     steps_per_epoch = math.ceil(total_frames / effective_batch)
     steps = steps_per_epoch * epochs
     save_every_epochs, save_freq, save_steps, save_at_epochs = quarter_epoch_save_freq(
-        steps, steps_per_epoch, epochs
+        steps, steps_per_epoch, epochs, save_every
     )
     scheduler_warmup = min(1000, max(50, steps // 10))
     return {
@@ -110,6 +111,10 @@ def main() -> None:
     parser.add_argument("--n-gpus", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--n-nodes", type=int, default=1)
+    parser.add_argument(
+        "--save-every-epochs", type=int, default=0,
+        help="Save every N epochs. 0=auto (E/4). Default: 0",
+    )
     parser.add_argument("--as-exports", action="store_true")
     args = parser.parse_args()
 
@@ -120,6 +125,7 @@ def main() -> None:
         n_gpus=args.n_gpus,
         batch_size=args.batch_size,
         n_nodes=args.n_nodes,
+        save_every=args.save_every_epochs,
     )
 
     if args.as_exports:
