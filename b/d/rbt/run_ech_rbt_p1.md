@@ -125,6 +125,25 @@ $$
 | `SAVE_FREQ` | `STEPS_PER_EPOCH` | 每 epoch 存一次 checkpoint |
 | `SCHED_WARMUP_STEPS` | `STEPS_PER_EPOCH` | LR 线性预热 1 个 epoch |
 
+**训练后监控变量**（可通过 `config_p1.env` 或 CLI `--monitor-interval` 等覆盖）：
+
+| 变量 | 含义 | 默认值 | 备注 |
+|:---|:---|:---|:---|
+| `MONITOR_INTERVAL` | 监控轮询间隔（秒） | `900`（15 分钟） | 训练进入稳定期后，每隔此时间检查一次训练状态 |
+| `LOG_STALE_THRESHOLD` | 日志陈旧判定阈值（秒） | `900`（15 分钟） | 日志文件超过此时间未更新且 GPU 无进展，视为训练卡住 |
+| `MONITOR_STABLE_AFTER` | 进入稳定期的等待时间（秒） | `180`（3 分钟） | 训练启动后等待此时间再开始定时监控，避免初始化阶段误判 |
+| `BIGMATRIX_SCRIPT` | GPU 占位脚本路径 | `${ITVLAGP_ROOT}/b/d/rbt/bigmatrix_multiply_optimization.py` | 训练结束后启动此脚本占用 GPU |
+| `BIGMATRIX_LOG` | GPU 占位脚本日志 | `/tmp/bigmatrix_multiply_optimization.log` | nohup 输出重定向 |
+
+**监控状态机**（由 `monitor_training()` 函数驱动）：
+
+| 状态 | 条件 | 动作 |
+|:---|:---|:---|
+| `RUNNING` | 训练进程存活 + 日志在 `LOG_STALE_THRESHOLD` 内有更新 | 继续监控 |
+| `STUCK` | 训练进程存活但日志超过 `LOG_STALE_THRESHOLD` 未更新；或 GPU 持续 `LOG_STALE_THRESHOLD` 无进展且 checkpoint 不完整 | **先** 清理 GPU → 启动 bigmatrix，**再** 打包日志（`_err` 后缀）→ 拷贝到 `~/b/Ckp/` |
+| `COMPLETED` | GPU 连续 `MONITOR_INTERVAL` 无计算进程 + 最终 epoch checkpoint 完整 | **先** 清理 GPU → 启动 bigmatrix，**再** 打包日志 → 拷贝到 `~/b/Ckp/` |
+| `FAILED` | 训练进程退出 + GPU 空闲 + checkpoint 不完整 | 同 `STUCK`（**先** cleanup→bigmatrix，**再** 打包 `_err`） |
+
 > **与 `run_each_rbt_p012.sh` 的差异**（出处: [`run_ech_rbt_p012.md` §3.2](run_ech_rbt_p012.md)、[`config.env.example`](../../s/rbt/config.env.example)）:
 > - 新增 `EXPR_NAME` 做顶层路径隔离。
 > - `CKPT_ROOT` 从 `~/Ckp/itvlaGp` 改为 `~/b/Ckp/${EXPR_NAME}`。
@@ -552,8 +571,8 @@ LeRobot 训练入口（[`src/lerobot/scripts/lerobot_train.py`](../../src/lerobo
 
 | 文件路径 | 说明 |
 |:---|:---|
-| `b/s/rbt/run_warmup_p1.sh` | Phase 1 Warmup 编排脚本。动态计算 epoch 步数，循环任务，调用 launch 脚本，分离日志与 checkpoint |
-| `b/s/rbt/config_p1.env` | 机器本地配置（不提交 git） |
+| `b/s/rbt/run_warmup_p1.sh` | Phase 1 Warmup 编排脚本。动态计算 epoch 步数，循环任务，调用 launch 脚本，分离日志与 checkpoint。内含训练后监控功能：后台启动训练，定时轮询状态，训练结束/卡住时自动打包日志、清理 GPU、启动 bigmatrix 占位脚本 |
+| `b/s/rbt/config_p1.env` | 机器本地配置（不提交 git）。含监控参数 `MONITOR_INTERVAL`、`LOG_STALE_THRESHOLD` 等 |
 
 ### 8.4 无需修改的其他文件
 
@@ -585,10 +604,14 @@ flowchart TD
     smoke -->|是| s2
     s1 -->|成功| s2["正式 Warmup Ti<br/>8 GPU x 6 epochs<br/>仅用 Ti 的数据"]
     s1 -->|失败| fail["FAIL Ti: 记录错误"]
-    s2 -->|成功| verify["验证 Ti 的最终 epoch ckpt 存在"]
-    s2 -->|失败| fail
-    verify --> mv["移动 Ti 的 wandb → /B/Log/<br/>创建 Ti 的 latest 符号链接"]
-    mv --> state["写 Ti 的 pipeline_state.json (ok)<br/>✓ Ti 完全成功"]
+    s2 -->|"后台启动"| monitor["进入监控循环<br/>每 MONITOR_INTERVAL 检查"]
+    monitor -->|"训练正常运行"| monitor
+    monitor -->|"训练完成<br/>ckpt 完整"| verify["验证最终 epoch ckpt"]
+    monitor -->|"训练卡住/失败<br/>ckpt 不完整"| post_err["清理 GPU → 启动 bigmatrix<br/>打包日志 (_err) → ~/b/Ckp/"]
+    post_err --> fail
+    verify --> mv["移动 wandb → /B/Log/<br/>创建 latest 符号链接"]
+    mv --> post_ok["清理 GPU → 启动 bigmatrix<br/>打包日志 → ~/b/Ckp/"]
+    post_ok --> state["写 pipeline_state.json (ok)<br/>✓ Ti 完全成功"]
     state --> loop
     fail -->|"--keep-going"| loop
     fail -->|默认| abort["中止, 不继续后续任务"]
@@ -623,6 +646,69 @@ flowchart TB
     train --> policy["policies/internvla_a1_5/modeling_internvla_a1_5.py"]
     train --> dataset["datasets/factory.py → make_dataset()"]
 ```
+
+### 9.4 训练后监控流程
+
+训练以后台进程启动后，编排脚本进入一个定时监控循环。监控逻辑在训练进入稳定期（`MONITOR_STABLE_AFTER` 秒后）开始生效，之后每 `MONITOR_INTERVAL` 秒检查一次。
+
+```mermaid
+flowchart TD
+    launch["后台启动训练<br/>bash LAUNCH &<br/>记录 TRAIN_PID"]
+    launch --> wait_stable["等待 MONITOR_STABLE_AFTER 秒<br/>训练进入稳定期"]
+    wait_stable --> check{"每 MONITOR_INTERVAL 秒<br/>检查训练状态"}
+
+    check --> pid_alive{"TRAIN_PID<br/>还存活?"}
+
+    pid_alive -->|是| log_fresh{"日志文件<br/>LOG_STALE_THRESHOLD 内<br/>有更新?"}
+    log_fresh -->|是| running["RUNNING ✓<br/>训练正常运行"]
+    running --> check
+
+    log_fresh -->|否| stuck["STUCK ✗<br/>日志 15 分钟无变化"]
+    stuck --> kill_train["kill 训练进程树"]
+    kill_train --> cleanup_err["清理 GPU 残留进程"]
+    cleanup_err --> bigmatrix_err["nohup python -u bigmatrix_multiply_optimization.py &<br/>disown (重试直到成功占 GPU)"]
+    bigmatrix_err --> pack_err
+
+    pid_alive -->|否| gpu_idle{"GPU 连续<br/>MONITOR_INTERVAL<br/>无计算进程?"}
+    gpu_idle -->|是| ckpt_ok{"最终 epoch<br/>checkpoint 完整?"}
+    gpu_idle -->|否| waiting["等待下一轮<br/>（GPU 正在收尾）"]
+    waiting --> check
+    ckpt_ok -->|是| completed["COMPLETED ✓"]
+    completed --> cleanup_ok["清理 GPU 残留进程"]
+    cleanup_ok --> bigmatrix_ok["nohup python -u bigmatrix_multiply_optimization.py &<br/>disown (重试直到成功占 GPU)"]
+    bigmatrix_ok --> pack_ok["打包 /B/Log/${EXPR_NAME}/<br/>→ ${EXPR_NAME}_LOG_YYMMDDhh.tar<br/>→ ~/b/Ckp/"]
+
+    ckpt_ok -->|否| failed["FAILED ✗<br/>GPU 空闲但 ckpt 不完整"]
+    failed --> cleanup_fail["清理 GPU 残留进程"]
+    cleanup_fail --> bigmatrix_fail["nohup python -u bigmatrix_multiply_optimization.py &<br/>disown (重试直到成功占 GPU)"]
+    bigmatrix_fail --> pack_err["打包 /B/Log/${EXPR_NAME}/<br/>→ ${EXPR_NAME}_LOG_YYMMDDhh_err.tar<br/>→ ~/b/Ckp/"]
+
+    style running fill:#e8f5e9
+    style completed fill:#e8f5e9
+    style stuck fill:#ffebee
+    style failed fill:#ffebee
+```
+
+**打包命名规则**:
+
+| 场景 | tar 包名称 | 示例 |
+|:---|:---|:---|
+| 训练成功完成 | `${EXPR_NAME}_LOG_<YYMMDDhh>.tar` | `ItvlaGpRbt0905_LOG_26090413.tar` |
+| 训练卡住/失败 | `${EXPR_NAME}_LOG_<YYMMDDhh>_err.tar` | `ItvlaGpRbt0905_LOG_26090413_err.tar` |
+
+> **时间戳格式**: `YYMMDDhh`，精确到小时，如 `26090413` 表示 2026-09-04 13:xx。
+
+**后处理顺序**（成功和失败路径均相同，顺序不可颠倒）:
+
+$$\text{清理 GPU} \rightarrow \text{启动 bigmatrix（重试直到成功占 GPU）} \rightarrow \text{打包日志 tar → 拷贝 ~/b/Ckp/}$$
+
+> 先占 GPU 再打包，是因为打包耗时较长（可能数分钟），若先打包再占 GPU，会出现 GPU 空窗期被他人抢占的风险。
+
+**成功判定**: GPU 连续 `MONITOR_INTERVAL`（默认 15 分钟）无计算进程，且最终 epoch checkpoint 完整（含 `model.safetensors` 和 `config.json`）。监控循环每 15 分钟轮询一次 `nvidia-smi`，发现 GPU 空闲后再次确认 checkpoint 完整性。
+
+**GPU 清理**: 使用 `nvidia-smi --query-compute-apps=pid --format=csv,noheader` 获取所有占用 GPU 的计算进程 PID，逐个 `kill -9`，再 sleep 2 秒确认清退。
+
+**bigmatrix 启动**: `nohup python -u <script> > /tmp/bigmatrix_multiply_optimization.log 2>&1 &` + `disown`。启动后等待 5 秒检查进程存活，不存活则重试，最多重试 3 次。
 
 ---
 
@@ -747,6 +833,12 @@ NODE_COUNT=1
 NUM_EPOCHS=6
 WARMUP_MASTER_PORT=36201
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+# === 训练后监控 ===
+MONITOR_INTERVAL=900           # 监控轮询间隔 (秒), 默认 15 分钟
+LOG_STALE_THRESHOLD=900        # 日志陈旧判定阈值 (秒), 默认 15 分钟
+MONITOR_STABLE_AFTER=180       # 训练启动后等待多久进入监控 (秒), 默认 3 分钟
+# BIGMATRIX_SCRIPT 和 BIGMATRIX_LOG 有合理默认值, 一般无需配置
 ```
 
 > **换机器时必须改的项**: `CLEAN_ROOT`、`VENV_ROOT`、`TRAIN_PYTHON`、`HF_HOME` 及其下的权重路径。
@@ -796,6 +888,13 @@ WARMUP_MASTER_PORT="${WARMUP_MASTER_PORT:-36201}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(build_cuda_devices "${PROC_PER_NODE}")}"
 SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-2}"
 
+# 训练后监控
+MONITOR_INTERVAL="${MONITOR_INTERVAL:-900}"             # 15 分钟
+LOG_STALE_THRESHOLD="${LOG_STALE_THRESHOLD:-900}"       # 15 分钟
+MONITOR_STABLE_AFTER="${MONITOR_STABLE_AFTER:-180}"     # 3 分钟
+BIGMATRIX_SCRIPT="${BIGMATRIX_SCRIPT:-${ITVLAGP_ROOT}/b/d/rbt/bigmatrix_multiply_optimization.py}"
+BIGMATRIX_LOG="${BIGMATRIX_LOG:-/tmp/bigmatrix_multiply_optimization.log}"
+
 DATA_SUFFIX="_lrb3_kptsim"
 
 # ======================== CLI ========================
@@ -831,8 +930,13 @@ usage() {
   --skip-smoke        跳过 1-step smoke 测试
   --keep-going        单任务失败后继续下一个
   --dry-run           只打印命令不执行
+  --monitor-interval N  监控轮询间隔 (秒, 默认 1800=30分钟)
+  --log-stale N         日志陈旧判定阈值 (秒, 默认 900=15分钟)
+  --no-monitor          禁用训练后监控 (同步等待训练结束)
 USAGE
 }
+
+ENABLE_MONITOR=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -847,6 +951,9 @@ while [[ $# -gt 0 ]]; do
     --skip-smoke)       SKIP_SMOKE=1; shift ;;
     --keep-going)       KEEP_GOING=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
+    --monitor-interval) MONITOR_INTERVAL="$2"; shift 2 ;;
+    --log-stale)        LOG_STALE_THRESHOLD="$2"; shift 2 ;;
+    --no-monitor)       ENABLE_MONITOR=0; shift ;;
     -h|--help)          usage; exit 0 ;;
     *)                  rbt_die "未知参数: $1 (见 --help)" ;;
   esac
@@ -920,6 +1027,219 @@ discover_warmup_tasks() {
     [[ -f "${d}norm_stat.json" ]] || continue
     [[ -f "${d}meta/keypoints_meta.json" ]] || continue
     echo "${task}"
+  done
+}
+
+# ======================== 监控辅助函数 ========================
+
+# 生成精确到小时的时间戳: YYMMDDhh, 如 26090413
+make_hour_stamp() {
+  date +'%y%m%d%H'
+}
+
+# 检查日志文件是否在 threshold 秒内有更新
+log_is_fresh() {
+  local log_file="$1" threshold="${2:-${LOG_STALE_THRESHOLD}}"
+  [[ -f "${log_file}" ]] || return 1
+  local now last_mod age
+  now="$(date +%s)"
+  last_mod="$(stat -c %Y "${log_file}" 2>/dev/null || echo 0)"
+  age=$((now - last_mod))
+  [[ ${age} -lt ${threshold} ]]
+}
+
+# 检查 GPU 上是否有计算进程
+gpu_has_processes() {
+  local pids
+  pids="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ')"
+  [[ -n "${pids}" ]]
+}
+
+# 获取 GPU 上所有计算进程的 PID 列表
+gpu_process_pids() {
+  nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ' | sort -u
+}
+
+# 检查最终 checkpoint 是否完整
+checkpoint_complete() {
+  local output_dir="$1" total_steps="$2"
+  local step_fmt
+  step_fmt="$(printf '%06d' "${total_steps}")"
+  local ckpt_path="${output_dir}/checkpoints/${step_fmt}/pretrained_model"
+  [[ -f "${ckpt_path}/config.json" ]] && \
+    { [[ -f "${ckpt_path}/model.safetensors" ]] || [[ -f "${ckpt_path}/model.safetensors.index.json" ]]; }
+}
+
+# 清理所有 GPU 上的计算进程
+cleanup_gpu() {
+  rbt_log "清理 GPU 残留进程..."
+  local pids
+  pids="$(gpu_process_pids)"
+  if [[ -z "${pids}" ]]; then
+    rbt_log "GPU 无残留进程"
+    return 0
+  fi
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    rbt_log "  kill -9 ${pid} ($(ps -p "${pid}" -o comm= 2>/dev/null || echo 'unknown'))"
+    kill -9 "${pid}" 2>/dev/null || true
+  done <<< "${pids}"
+  sleep 2
+  if gpu_has_processes; then
+    rbt_log "警告: 仍有 GPU 进程残留"
+  else
+    rbt_log "GPU 进程已全部清理"
+  fi
+}
+
+# 打包日志目录到 tar 并拷贝到 ~/b/Ckp/
+pack_logs() {
+  local is_error="${1:-0}"
+  local stamp
+  stamp="$(make_hour_stamp)"
+  local suffix=""
+  [[ "${is_error}" == "1" ]] && suffix="_err"
+  local tar_name="${EXPR_NAME}_LOG_${stamp}${suffix}.tar"
+  local dest_dir="${HOME}/b/Ckp"
+  mkdir -p "${dest_dir}"
+  local log_dir="/B/Log/${EXPR_NAME}"
+  if [[ ! -d "${log_dir}" ]]; then
+    rbt_log "警告: 日志目录 ${log_dir} 不存在, 跳过打包"
+    return 0
+  fi
+  rbt_log "打包日志: ${log_dir} → ${dest_dir}/${tar_name}"
+  tar -cf "${dest_dir}/${tar_name}" -C "$(dirname "${log_dir}")" "$(basename "${log_dir}")" 2>/dev/null || {
+    rbt_log "警告: tar 打包失败, 尝试继续"
+  }
+  rbt_log "日志包: ${dest_dir}/${tar_name}"
+}
+
+# 启动 bigmatrix 占位脚本 (nohup + disown)
+launch_bigmatrix() {
+  local script="${BIGMATRIX_SCRIPT}"
+  local log="${BIGMATRIX_LOG}"
+  if [[ ! -f "${script}" ]]; then
+    rbt_log "警告: bigmatrix 脚本不存在: ${script}, 跳过"
+    return 1
+  fi
+  local max_retries=3 attempt=0
+  while [[ ${attempt} -lt ${max_retries} ]]; do
+    attempt=$((attempt + 1))
+    rbt_log "启动 bigmatrix (第 ${attempt} 次): nohup python -u ${script} > ${log} 2>&1 &"
+    nohup "${TRAIN_PYTHON}" -u "${script}" > "${log}" 2>&1 &
+    local bg_pid=$!
+    disown "${bg_pid}" 2>/dev/null || true
+    sleep 5
+    if kill -0 "${bg_pid}" 2>/dev/null; then
+      rbt_log "bigmatrix 已启动, PID=${bg_pid}"
+      return 0
+    else
+      rbt_log "bigmatrix 启动后 5 秒内退出, 检查日志: ${log}"
+      tail -5 "${log}" 2>/dev/null || true
+    fi
+  done
+  rbt_log "错误: bigmatrix 连续 ${max_retries} 次启动失败"
+  return 1
+}
+
+# 训练结束后的统一后处理: 先占 GPU 再打包 (避免 GPU 空窗)
+# 顺序: 清理 GPU → 启动 bigmatrix → 打包日志 tar → 拷贝 ~/b/Ckp/
+post_training_actions() {
+  local is_error="${1:-0}"
+  cleanup_gpu
+  launch_bigmatrix || true
+  pack_logs "${is_error}"
+}
+
+# 监控训练进程, 定时检查状态
+# 参数: $1=训练进程 PID, $2=日志文件路径, $3=OUTPUT_DIR, $4=TOTAL_STEPS
+# 返回: 0=训练成功完成, 1=训练卡住或失败
+#
+# 判定逻辑 (每 MONITOR_INTERVAL 秒检查一次):
+#   RUNNING:   训练进程存活 + 日志在 LOG_STALE_THRESHOLD 内有更新
+#   STUCK:     (a) 训练进程存活但日志超 LOG_STALE_THRESHOLD 无更新, 或
+#              (b) GPU 有进程但日志+ckpt 都不完整且超 LOG_STALE_THRESHOLD 无进展
+#   COMPLETED: GPU 连续 MONITOR_INTERVAL 无计算进程 + 最终 ckpt 完整
+#   FAILED:    GPU 连续 MONITOR_INTERVAL 无计算进程 + 最终 ckpt 不完整
+monitor_training() {
+  local train_pid="$1" log_file="$2" output_dir="$3" total_steps="$4"
+  local gpu_idle_since=0  # 首次发现 GPU 空闲的时间 (epoch seconds), 0=未空闲
+
+  rbt_log "[监控] 等待 ${MONITOR_STABLE_AFTER} 秒进入稳定期..."
+  local waited=0
+  while [[ ${waited} -lt ${MONITOR_STABLE_AFTER} ]]; do
+    if ! kill -0 "${train_pid}" 2>/dev/null; then
+      rbt_log "[监控] 训练在稳定期前退出"
+      wait "${train_pid}" 2>/dev/null || true
+      # 即使提前退出, 也不立即判定 — 等 GPU 空闲后再判
+      break
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+
+  rbt_log "[监控] 已进入稳定期, 每 ${MONITOR_INTERVAL} 秒检查一次 (LOG_STALE=${LOG_STALE_THRESHOLD}s)"
+
+  while true; do
+    sleep "${MONITOR_INTERVAL}"
+    local now
+    now="$(date +%s)"
+
+    # ---- 训练进程仍存活 ----
+    if kill -0 "${train_pid}" 2>/dev/null; then
+      gpu_idle_since=0  # 进程还在, 重置空闲计时
+      if log_is_fresh "${log_file}"; then
+        rbt_log "[监控] RUNNING — 日志活跃, 训练正常"
+      else
+        rbt_log "[监控] STUCK — 日志 ${LOG_STALE_THRESHOLD} 秒无更新, 训练进程仍存活"
+        rbt_log "[监控] 终止训练进程树 (PID=${train_pid})"
+        kill -TERM "${train_pid}" 2>/dev/null || true
+        sleep 5
+        kill -9 "${train_pid}" 2>/dev/null || true
+        wait "${train_pid}" 2>/dev/null || true
+        return 1
+      fi
+      continue
+    fi
+
+    # ---- 训练进程已退出 ----
+    wait "${train_pid}" 2>/dev/null || true
+
+    if gpu_has_processes; then
+      # GPU 上仍有进程 (可能是 checkpoint 写入收尾)
+      gpu_idle_since=0  # 有进程, 不算空闲
+      if log_is_fresh "${log_file}"; then
+        rbt_log "[监控] 训练 PID 退出但 GPU 有进程且日志活跃, 继续等待..."
+        continue
+      fi
+      # 日志也不活跃了: GPU 有进程但无进展
+      rbt_log "[监控] STUCK — 训练退出, GPU 有进程但日志 ${LOG_STALE_THRESHOLD}s 无更新"
+      return 1
+    fi
+
+    # ---- GPU 空闲 (无计算进程) ----
+    if [[ ${gpu_idle_since} -eq 0 ]]; then
+      gpu_idle_since="${now}"
+      rbt_log "[监控] GPU 首次检测到空闲, 开始计时 (需连续 ${MONITOR_INTERVAL}s 空闲才判定)"
+      continue
+    fi
+
+    local idle_duration=$((now - gpu_idle_since))
+    if [[ ${idle_duration} -lt ${MONITOR_INTERVAL} ]]; then
+      rbt_log "[监控] GPU 空闲 ${idle_duration}s / 需 ${MONITOR_INTERVAL}s, 继续等待..."
+      continue
+    fi
+
+    # GPU 已连续 MONITOR_INTERVAL 秒空闲 — 训练肯定结束了
+    rbt_log "[监控] GPU 已连续 ${idle_duration}s 空闲, 判定训练已结束"
+    if checkpoint_complete "${output_dir}" "${total_steps}"; then
+      rbt_log "[监控] COMPLETED — checkpoint 完整"
+      return 0
+    else
+      rbt_log "[监控] FAILED — GPU 空闲但 checkpoint 不完整"
+      return 1
+    fi
   done
 }
 
@@ -1098,15 +1418,35 @@ for TASK in "${TASKS[@]}"; do
     rm -rf "${OUTPUT_DIR}_smoke" 2>/dev/null || true
   fi
 
-  # Full warmup
+  # Full warmup (后台启动 + 监控)
   if [[ "${task_ok}" == "1" ]]; then
     rbt_log "[${TASK}] 正式 Warmup ${NUM_EPOCHS} epochs (${TOTAL_STEPS} steps)"
-    if ! SMOKE=0 STEPS="${TOTAL_STEPS}" SAVE_FREQ="${SAVE_FREQ}" \
-         OUTPUT_DIR="${OUTPUT_DIR}" LOG_FILE="${LOG_FILE}" \
-         JOB_NAME="${JOB_NAME}" \
-         bash "${LAUNCH}"; then
-      rbt_log "!!! ${TASK} warmup 失败 !!!"
-      task_ok=0
+
+    if [[ "${ENABLE_MONITOR}" == "1" ]]; then
+      # ---- 后台启动 + 定时监控 ----
+      SMOKE=0 STEPS="${TOTAL_STEPS}" SAVE_FREQ="${SAVE_FREQ}" \
+           OUTPUT_DIR="${OUTPUT_DIR}" LOG_FILE="${LOG_FILE}" \
+           JOB_NAME="${JOB_NAME}" \
+           bash "${LAUNCH}" &
+      TRAIN_PID=$!
+      rbt_log "[${TASK}] 训练已后台启动, PID=${TRAIN_PID}"
+
+      if monitor_training "${TRAIN_PID}" "${LOG_FILE}" "${OUTPUT_DIR}" "${TOTAL_STEPS}"; then
+        rbt_log "[${TASK}] 监控判定: 训练成功完成"
+      else
+        rbt_log "!!! ${TASK} 监控判定: 训练卡住或失败 !!!"
+        post_training_actions 1   # is_error=1 → 打包 _err 后缀
+        task_ok=0
+      fi
+    else
+      # ---- 同步等待 (--no-monitor) ----
+      if ! SMOKE=0 STEPS="${TOTAL_STEPS}" SAVE_FREQ="${SAVE_FREQ}" \
+           OUTPUT_DIR="${OUTPUT_DIR}" LOG_FILE="${LOG_FILE}" \
+           JOB_NAME="${JOB_NAME}" \
+           bash "${LAUNCH}"; then
+        rbt_log "!!! ${TASK} warmup 失败 !!!"
+        task_ok=0
+      fi
     fi
   fi
 
@@ -1130,6 +1470,7 @@ for TASK in "${TASKS[@]}"; do
     FAIL_LIST+=("${TASK}")
     TASK_STATE="${STATE_FILE}" TASK_NAME="${TASK}" \
       write_state "warmup" "failed" "{\"reason\":\"ckpt_not_found\",\"expected\":\"${CKPT_PATH}\"}"
+    post_training_actions 1   # ckpt 不完整, 打包 _err
     if [[ "${KEEP_GOING}" != "1" ]]; then
       rbt_die "中止: ${TASK} 缺少 ckpt@${TOTAL_STEPS}"
     fi
@@ -1159,6 +1500,11 @@ for TASK in "${TASKS[@]}"; do
     if [[ "${decode_err}" -ne 0 || "${zero_frames}" -ne 0 ]]; then
       rbt_log "警告: ${TASK} 有 video decode 异常 (decode_error=${decode_err}, zeros=${zero_frames})"
     fi
+  fi
+
+  # -- 训练成功后处理: 打包日志 + 清理 GPU + 启动 bigmatrix --
+  if [[ "${ENABLE_MONITOR}" == "1" ]]; then
+    post_training_actions 0   # is_error=0 → 正常打包 (无 _err 后缀)
   fi
 
   SUCCEEDED=$((SUCCEEDED + 1))
@@ -1438,6 +1784,11 @@ ls /B/Log/${EXPR_NAME}/config_p1.env
 | accelerate 端口冲突 | 另一个训练占用 36201 | 改 `WARMUP_MASTER_PORT` |
 | 大数据量任务 total_steps 过多 | 帧数太大导致 6 epoch 很长 | 可临时减小 `NUM_EPOCHS`（如 3） |
 | `total_frames` 读取为 0 | `meta/info.json` 格式异常 | 检查 `python3 -c "import json; print(json.load(open('...'))['total_frames'])"` |
+| 监控误判 STUCK | `LOG_STALE_THRESHOLD` 太短，checkpoint 保存期间日志不更新 | 增大 `LOG_STALE_THRESHOLD`（如 1800 秒）或 `--log-stale 1800` |
+| bigmatrix 启动失败 | Python 环境缺少 torch 或 CUDA 初始化失败 | 检查 `/tmp/bigmatrix_multiply_optimization.log`，确认 `TRAIN_PYTHON` 可 `import torch` |
+| 日志打包 tar 失败 | `/B/Log/${EXPR_NAME}` 目录权限或磁盘空间不足 | 确认 `~/b/Ckp/` 可写且空间充足 |
+| 监控模式下训练卡在初始化 | 训练还在加载模型（可能需 >3 分钟），被误判为 STUCK | 增大 `MONITOR_STABLE_AFTER`（如 600 秒） |
+| 清理 GPU 后仍有残留进程 | 僵尸进程或系统服务占 GPU | 手动 `nvidia-smi` 检查并 `kill -9` |
 
 ---
 
