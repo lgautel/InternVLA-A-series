@@ -298,7 +298,8 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
   | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
 sudo apt-get update -y
 sudo apt-get install -y google-cloud-cli
-gcloud auth login --no-launch-browser
+gcloud auth application-default login  --no-launch-browser
+# 或 gcloud auth login --no-launch-browser
 ```
 
 登录注意：
