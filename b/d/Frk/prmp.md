@@ -72,3 +72,6 @@
 
 请按照"基于 Franka 机器人的 `单机器臂插插座的数据`warmup训练出来的checkpoint进行SFT微调训练的实施落地方案(含详细操作手册)"  @b/d/Frk/plug_p2sft.md 里的指示 ,  用在Franka 机器人的 `单机器臂插插座的数据`上进行warmup训练得到的checkpoint(`/home/a26113/b/Ckp/itvlagpFrkPlug0907/2026_09_07_04_53_50-internvla_a1_5-frk-plug-warmup/checkpoints/003126/pretrained_model`), 在 /B/Dta/plug_into_socket_lrb_4D 里的数据上进行SFT微调训练. 训练过程中若遇到error就fix, 直到SFT训练成功完成而且相关测试和验收也全都通过. 记录所有训练过程中的一切细节, 包括但不限于:所有的error及其根因分析, fix方案, 记录所有的操作, 命令, 关键路径和任何文件的增删改以及做这些操作的原因, 过程中的一切细节都记录在 @b/d/Frk/plug_p2sft_0907LOG.md 后面. 在SFT成功后或失败而挂起时, 启动 bigmatrix_multiply_optimization.py 后台任务占GPU, 然后把日志文件打包到 ~/b/Ckp/ 中.  开始SFT微调训练吧.
 
+
+
+# 部署方案
