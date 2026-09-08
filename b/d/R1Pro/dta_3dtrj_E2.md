@@ -892,11 +892,14 @@ class TrackEncoder(nn.Module):
 | `keypoint_embedding` | Embedding(J, 1024) | Embedding(J, 1024) | ✓ |
 | 其余模型 | 不变 | 不变 | ✓ |
 
-**结论**: E1 的权重与方案 E (input_dim=3) **不兼容** — `PointPatchEmbedding.conv` 和 `keypoint_out_proj` 的第一层/最后一层 shape 不匹配. 但这不构成问题, 因为:
+**结论**: E1 的权重与方案 E (input_dim=3) **在 TrackEncoder 输入层不兼容** — `PointPatchEmbedding.conv` 和 `keypoint_out_proj` 的 shape 不同. 代码行为（`keypoints.py::geopredict_track_encoder_input_compatible`）:
 
-1. R1 Pro 不使用 GeoPredict 预训练权重（r1pro_migration_design.md §6.5）
-2. Phase 1 warmup 从随机初始化开始 (`init_kpt_expert_from_action=true` 复制 action expert 的权重, 但 TrackEncoder 和 out_proj 是全新的)
-3. 不兼容的层恰好就是需要随机初始化的层
+1. **`kpt_4d_mode=pos_rot`（7D）+ GeoPredict RoboCasa（3D ckpt）**: 传入 `geopredict_checkpoint_path` 也**不会**加载 TrackEncoder — **整网随机 init** + warning
+2. **Keypoint Expert** 仍可通过 `init_kpt_expert_from_action=true` 从 Action Expert 热启动（Stage 3）
+3. **`keypoint_out_proj`** 始终随机 init（与 GeoPredict 无关）
+4. Phase 2 不设 `geopredict_checkpoint_path`，TrackEncoder 权重来自 Phase 1 ckpt
+
+> 旧文档曾写「R1 Pro 不使用 GeoPredict 预训练权重」— 准确含义是 **7D 模式下 TrackEncoder 无法复用 3D GeoPredict ckpt**，而非禁止传 CLI 参数。3D 迁移（`pos_only`）仍正常加载 GeoPredict。
 
 ### 7.5 CLI 参数汇总
 
@@ -1177,7 +1180,7 @@ flowchart LR
 | **FK 提取速度** | ~34k fps | ~32k fps (估, 额外四元数开销 <5%) |
 | **模型代码改动文件数** | 0 | **3** (config + modeling + transform) |
 | **新增配置参数数** | 0 | **4** (`keypoint_out_dim`, `keypoint_dim`, `kpt_rot_loss_weight`, `kpt_rot_loss_type`) |
-| **GeoPredict 预训练兼容** | — | 不兼容 (Conv1d 和 out_proj 维度不同, 但不使用预训练) |
+| **GeoPredict 预训练兼容** | — | 7D 与 3D ckpt 输入 shape 不兼容 → **TrackEncoder 整网随机 init**（传 path 亦 warning）；3D 仍可选择性加载 |
 | **信息量** | 位置 (在哪) | 位置 + 朝向 (**在哪 + 朝哪**) |
 
 ### 11.1 为什么 E1 值得做
@@ -1199,7 +1202,7 @@ flowchart LR
 | **FK 提取速度** | -5% (额外四元数计算) | ✅ |
 | **训练显存** | his_kpts buffer 从 [B,H,J,3] 到 [B,H,J,7], 增加 133% | ⚠️ 可通过减小 H 缓解 |
 | **损失调参** | 新增 $\lambda_{\text{rot}}$ 超参数 | ⚠️ 增加调参负担, 但可从 1.0 开始 |
-| **预训练不兼容** | Conv1d(7) 与 Conv1d(3) 权重不兼容 | ✅ 本方案不用预训练 |
+| **预训练不兼容** | Conv1d(7) 与 Conv1d(3) 权重不兼容 | ✅ 代码自动跳过 GeoPredict 加载，TrackEncoder 随机 init |
 
 ---
 

@@ -350,6 +350,16 @@ Batch:         his_kpts [B,200,8,7] → TrackEncoder(Conv1d in=7)
 4. **语义**：`J` 维是 **link 索引**（Franka 8 个 link frame），`7` 维是该 frame 在 `base_link` 下的归一化位姿。
 5. **与 GeoPredict 原版差异**：原版 TrackEncoder 只吃 3D 位置轨迹；E1/Franka 在 `pos_rot` 模式下把 **四元数也作为轨迹通道** 一并编码（`input_dim=7`）。
 
+### TrackEncoder 与 GeoPredict 预训练权重
+
+- CLI 开关：`--policy.geopredict_checkpoint_path`（默认 `None`）
+- 判定函数：`keypoints.py::geopredict_track_encoder_input_compatible()`
+- **`input_dim=3`** 或 checkpoint `point_patch_embed.conv.weight` shape 匹配 → 选择性加载 GeoPredict
+- **Franka/R1Pro 7D**（`pos_rot`）+ RoboCasa 3D ckpt → **不加载**，TrackEncoder 整网随机 init + warning（传 path 亦如此）
+- Phase 2 不设 `geopredict_checkpoint_path`，从 Warmup ckpt 恢复 TrackEncoder
+
+详见 `plug_p1warmup.md` §7.3。
+
 若需要，我可以再补一节：**推理部署时如何从关节角在线 FK 构造 `his_kpts` 窗口**（与训练 GT 路径的对应关系）。
 
 # Franka插拔插座数据集的hdf5里有什么

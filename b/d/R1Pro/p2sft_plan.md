@@ -123,7 +123,8 @@ export WAN_DIR="${HF_HOME}/hub/Wan2.2-TI2V-5B"
 # InternVLA-A1.5-base 权重路径（Phase 1 用，Phase 2 不再需要）
 export PRETRAINED_BASE="${HF_HOME}/hub/InternVLA-A1.5-base"
 
-# GeoPredict RoboCasa checkpoint（Phase 1 用，Phase 2 不再需要）
+# GeoPredict RoboCasa checkpoint（Phase 1 可选；Phase 2 不再需要）
+# 仅当 TrackEncoder input_dim=3 或 conv shape 与 ckpt 匹配时才真正加载；7D (pos_rot) 传了也只会 warning + 随机 init
 export GEOPREDICT_CKPT="${HF_HOME}/ckpts/GeoPredict_robocasa.pth"
 
 # ==============================================================

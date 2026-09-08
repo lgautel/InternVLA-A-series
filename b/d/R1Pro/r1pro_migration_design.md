@@ -549,10 +549,45 @@ description: "R1 Pro dual-arm mobile robot"
 
 ### 6.5 GeoPredict 预训练权重兼容性
 
-GeoPredict 预训练权重（`GeoPredict_robocasa.pth`）的 TrackEncoder 是 **per-joint 独立处理**的（`for point_idx in range(num_points)`），权重与 J 无关，可直接加载到 J=16 的模型中。唯一不兼容的是：
+> **代码出处**: `src/lerobot/policies/internvla_a1_5/keypoints.py` — `geopredict_track_encoder_input_compatible()`、`load_geopredict_track_encoder_weights()`；由 `geopredict_checkpoint_path` CLI 触发（`configuration_internvla_a1_5.py` 默认 `None`）。
 
-- `keypoint_embedding`：`nn.Embedding(J, hidden_size)`，J 从 8→16 shape 不匹配。但此参数**不从 GeoPredict 加载**——它走 `init_kpt_expert_from_action` 初始化（Stage 3），或随机初始化。
-- `track_fusion_layer`：output_dim 不同（2048 vs 1024），已在 `_LOADABLE_SUBMODULE_PREFIXES` 中排除，不影响。
+#### 6.5.1 是否加载 GeoPredict：由 input shape 决定
+
+仅当 CLI 传入 `--policy.geopredict_checkpoint_path=...` 时才会尝试加载。加载与否**不**取决于 robot_type 或数据集，而取决于：
+
+| 条件 | TrackEncoder 初始化 |
+|:---|:---|
+| `input_dim == 3`（`kpt_4d_mode=pos_only`，R1Pro 3D 迁移） | **加载** GeoPredict（选择性，见下） |
+| `input_dim != 3`，但 checkpoint 的 `point_patch_embed.conv.weight` 与模型 shape **一致** | **加载** |
+| 以上均不满足（R1Pro 电梯 7D + RoboCasa 3D ckpt） | **整网随机 init** + **warning**（即使传了 `geopredict_checkpoint_path`） |
+
+不兼容时的 warning 示例：
+
+```text
+GeoPredict TrackEncoder weights were NOT loaded from ...: TrackEncoder input shape is incompatible ...
+The entire TrackEncoder will remain randomly initialized.
+```
+
+#### 6.5.2 兼容时的选择性加载（3D 场景）
+
+GeoPredict 预训练权重（`GeoPredict_robocasa.pth`）的 TrackEncoder 是 **per-joint 独立处理**的（`for point_idx in range(num_points)`），权重与 J 无关，可直接加载到 J=16 的模型中。
+
+**加载的子模块**: `queries`、`point_patch_embed`、`cross_attention_block`、`linear_transform`、`final_norm`
+
+**始终不加载**:
+
+- `keypoint_embedding`：`nn.Embedding(J, hidden_size)` — 走 `init_kpt_expert_from_action`（Stage 3）或随机 init
+- `track_fusion_layer`：output_dim 2048 vs 1024，在 `_LOADABLE_SUBMODULE_PREFIXES` 中排除
+
+典型日志：`loaded 26 keys, skipped 2 (track_fusion_layer)`。
+
+#### 6.5.3 R1Pro 各训练阶段
+
+| 阶段 | `kpt_4d_mode` | `geopredict_checkpoint_path` | TrackEncoder |
+|:---|:---|:---|:---|
+| Phase 1 3D 迁移 | `pos_only`（默认） | 设置 | GeoPredict 选择性加载 |
+| Phase 1 电梯 7D | `pos_rot` | 可设置但通常不兼容 | 整网随机 init + warning |
+| Phase 2 SFT | `pos_rot` | **不设** | 从 Phase 1 ckpt 恢复 |
 
 ### 6.6 关键点提取脚本核心逻辑
 

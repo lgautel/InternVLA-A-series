@@ -294,12 +294,77 @@ def _load_info_and_keys(dataset_root: Path) -> tuple[dict, list[str], list[str]]
     return info, keys, video_keys
 
 
+def _visual_stats_source_paths(dataset_root: Path) -> list[Path]:
+    return [
+        dataset_root / "meta" / "stats.json",
+        dataset_root / "meta" / "stats" / "abs" / "stats.json",
+    ]
+
+
 def _load_visual_stats(dataset_root: Path, video_keys: list[str]) -> dict:
+    for stats_path in _visual_stats_source_paths(dataset_root):
+        if not stats_path.exists():
+            continue
+        source_stats = json.load(open(stats_path))
+        visual = {k: source_stats[k] for k in video_keys if k in source_stats}
+        if visual:
+            print(f"Loaded visual stats from {stats_path}")
+            return visual
+    raise FileNotFoundError(
+        "Missing visual stats. Expected one of: "
+        + ", ".join(str(p) for p in _visual_stats_source_paths(dataset_root))
+    )
+
+
+def _resolve_dataset_root(
+    cfg,
+    dataset_root: Path | None = None,
+    *,
+    output_path: Path | None = None,
+) -> Path | None:
+    if dataset_root is not None:
+        return dataset_root
+    if cfg.dataset_root:
+        return Path(cfg.dataset_root)
+    if output_path is not None:
+        parts = output_path.parts
+        if len(parts) >= 4 and parts[-4:] == ("meta", "stats", "abs", "stats.json"):
+            return Path(*parts[:-4])
+        if len(parts) >= 3 and parts[-3:] == ("meta", "stats", "stats.json"):
+            return Path(*parts[:-3])
+    default_root = HF_LEROBOT_HOME / cfg.repo_id
+    return default_root if default_root.exists() else None
+
+
+def _resolve_output_path(cfg, action_mode: str) -> Path:
+    if cfg.output_path:
+        return Path(cfg.output_path)
+    if cfg.output_dir:
+        return Path(cfg.output_dir) / action_mode / cfg.repo_id / "stats.json"
+    return HF_LEROBOT_HOME / "stats" / action_mode / cfg.repo_id / "stats.json"
+
+
+def _maybe_sync_meta_stats(action_mode: str, dataset_root: Path | None, output_dict: dict) -> None:
+    if action_mode != "abs" or dataset_root is None:
+        return
     meta_stats_path = dataset_root / "meta" / "stats.json"
-    if not meta_stats_path.exists():
-        raise FileNotFoundError(f"Missing {meta_stats_path} for visual stats copy.")
-    meta_stats = json.load(open(meta_stats_path))
-    return {k: meta_stats[k] for k in video_keys if k in meta_stats}
+    meta_stats_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output_dict, meta_stats_path)
+    print(f"synced meta stats: {meta_stats_path}")
+
+
+def _write_stats_output(
+    cfg,
+    action_mode: str,
+    output_dict: dict,
+    dataset_root: Path | None = None,
+) -> Path:
+    out_path = _resolve_output_path(cfg, action_mode)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output_dict, out_path)
+    resolved_root = _resolve_dataset_root(cfg, dataset_root, output_path=out_path)
+    _maybe_sync_meta_stats(action_mode, resolved_root, output_dict)
+    return out_path
 
 
 def _iter_episode_slices(dataset_root: Path):
@@ -400,15 +465,7 @@ def compute_norm_stats_from_parquet(cfg, dataset_root: Path, repo_root: Path):
         _apply_preserved_moments(output_dict, preserved)
         print(f"Preserved min/max/mean/std/count from {cfg.preserve_moments_from}")
 
-    if cfg.output_path:
-        out_path = Path(cfg.output_path)
-    elif cfg.output_dir:
-        out_path = Path(cfg.output_dir) / action_mode / cfg.repo_id / "stats.json"
-    else:
-        out_path = HF_LEROBOT_HOME / "stats" / action_mode / cfg.repo_id / "stats.json"
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(output_dict, out_path)
+    out_path = _write_stats_output(cfg, action_mode, output_dict, dataset_root)
 
     print(f"total_episodes: {total_episodes}")
     print(f"total_frame: {total_frame}")
@@ -538,15 +595,8 @@ def compute_norm_stats(cfg):
         _apply_preserved_moments(output_dict, preserved)
         print(f"Preserved min/max/mean/std/count from {cfg.preserve_moments_from}")
 
-    if cfg.output_path:
-        out_path = Path(cfg.output_path)
-    elif cfg.output_dir:
-        out_path = Path(cfg.output_dir) / action_mode / cfg.repo_id / "stats.json"
-    else:
-        out_path = HF_LEROBOT_HOME / "stats" / action_mode / cfg.repo_id / "stats.json"
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(output_dict, out_path)
+    dataset_root = _resolve_dataset_root(cfg, root or getattr(dataset, "root", None))
+    out_path = _write_stats_output(cfg, action_mode, output_dict, dataset_root)
 
     print(f"total_frame: {total_frame}")
     print(f"output: {out_path}")

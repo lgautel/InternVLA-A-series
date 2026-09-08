@@ -1092,10 +1092,20 @@ class InternVLAA15(nn.Module):
         """Selectively load :attr:`track_encoder` weights from a real GeoPredict checkpoint
         (see design doc §6.2 and ``keypoints.py::load_geopredict_track_encoder_weights``)."""
         loaded, skipped = load_geopredict_track_encoder_weights(self.track_encoder, checkpoint_path)
-        logging.info(
-            "load_geopredict_keypoint_weights: loaded %d TrackEncoder keys from %s (skipped %d, e.g. track_fusion_layer).",
-            len(loaded), checkpoint_path, len(skipped),
-        )
+        if loaded:
+            logging.info(
+                "load_geopredict_keypoint_weights: loaded %d TrackEncoder keys from %s "
+                "(skipped %d, e.g. track_fusion_layer).",
+                len(loaded),
+                checkpoint_path,
+                len(skipped),
+            )
+        else:
+            logging.info(
+                "load_geopredict_keypoint_weights: no TrackEncoder keys loaded from %s; "
+                "TrackEncoder remains randomly initialized (see warning above if geopredict_checkpoint_path was set).",
+                checkpoint_path,
+            )
         return loaded, skipped
 
     def set_requires_grad(self):

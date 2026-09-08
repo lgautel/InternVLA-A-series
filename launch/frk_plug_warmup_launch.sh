@@ -191,6 +191,7 @@ ARGS=(
   --dataset.enable_keypoint_predictor=true
   --dataset.num_keypoint_joints=8
   --dataset.kpt_4d_mode=pos_rot
+  --dataset.keypoint_history_max_len=200
   --dataset.action_mode=abs
   --dataset.tokenize_state=true
   --dataset.use_fast_action_tokens=false
@@ -217,8 +218,8 @@ set -o pipefail
 train_exit=$?
 
 # ── Post check ────────────────────────────────────────────────────────────
-decode_err=$(grep -c '\[video_decode_error\]' "${LOG_FILE}" 2>/dev/null || echo 0)
-zero_frames=$(grep -c 'using_zeros' "${LOG_FILE}" 2>/dev/null || echo 0)
+decode_err=$(grep -c '\[video_decode_error\]' "${LOG_FILE}" 2>/dev/null) || decode_err=0
+zero_frames=$(grep -c 'using_zeros' "${LOG_FILE}" 2>/dev/null) || zero_frames=0
 echo "post_check: video_decode_error=${decode_err} using_zeros=${zero_frames} exit=${train_exit}"
 if [[ "${decode_err}" -ne 0 || "${zero_frames}" -ne 0 ]]; then
   echo "WARNING: video decode failures detected" >&2

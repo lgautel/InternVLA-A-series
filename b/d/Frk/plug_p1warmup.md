@@ -38,13 +38,14 @@ Phase 1 Warmup 是 InternVLA-A1.5 + GeoPredict 三阶段训练流程的第一步
 
 Warmup 的核心动作:
 1. **用 Action Expert 的权重初始化 Keypoint Expert** (`init_kpt_expert_from_action=true`)
-2. **加载 GeoPredict RoboCasa 预训练权重** 到 TrackEncoder（形状兼容的层）
+2. **按输入维度兼容性决定是否加载 GeoPredict RoboCasa 预训练权重** 到 TrackEncoder（见 §7.3；Franka 7D 通常整网随机 init）
 3. **以 kpt MSE loss 为主导、action flow-matching loss 为辅** 训练 6 个 epoch
 4. **输出 checkpoint** 供 Phase 2 SFT 作为起点
 
 ```mermaid
 graph LR
-    BASE["InternVLA-A1.5-base<br/>+ GeoPredict RoboCasa"] --> WU["Phase 1 Warmup<br/>6 epoch, 3120 steps<br/>VLM 冻结, kpt expert 预热"]
+    BASE["InternVLA-A1.5-base"] --> WU["Phase 1 Warmup<br/>6 epoch, 3120 steps<br/>VLM 冻结, kpt expert 预热"]
+    GEO["GeoPredict RoboCasa<br/>(仅 input 兼容时)"] -.->|"TrackEncoder 可选加载"| WU
     WU -->|"ckpt@1560 或 @3120"| P2["Phase 2 SFT<br/>(另一份方案)"]
 ```
 
@@ -86,6 +87,7 @@ Franka Panda 的插拔插座任务需要精确的末端姿态控制——插头�
 | 监控与 GPU 占用机制 | `b/d/GpRbt/run_ech_rbt_p1.md` §5-7, `b/d/GpRbt/run_ech_rbt_p1_0906LOG.md` |
 | R1Pro 环境配置参考 | `b/d/R1Pro/p2sft_plan.md` §1, `b/d/R1Pro/p2sft_planH200.md` §⚡ |
 | NCCL 插件修复 | `b/d/GpRbt/run_ech_rbt_p1_0906LOG.md` §2.2 |
+| GeoPredict TrackEncoder 加载判定 | `src/lerobot/policies/internvla_a1_5/keypoints.py` §7.3 本方案 |
 
 ---
 
@@ -342,7 +344,7 @@ $$\mathcal{L}_{\text{kpt}} = \mathcal{L}_{\text{pos}} + \lambda_{\text{rot}} \cd
 |:---|:---:|:---|:---|:---|
 | **模型起点** | | | | |
 | `pretrained_path` | InternVLA-A1.5-base | 基础模型权重路径 | Warmup 从 base 开始，不从其他 ckpt | `PlcCfg:77` |
-| `geopredict_checkpoint_path` | GeoPredict_robocasa.pth | TrackEncoder 预训练权重 | 加载 RoboCasa 域的 TrackEncoder，形状兼容层被初始化 | `IA15Cfg[PC]:490` |
+| `geopredict_checkpoint_path` | GeoPredict_robocasa.pth | GeoPredict TrackEncoder 预训练权重（**可选**） | CLI 传入路径；仅当 TrackEncoder 输入与 ckpt 兼容时才加载，否则整网随机 init + warning（§7.3） | `IA15Cfg[PC]:490` |
 | `init_kpt_expert_from_action` | `true` | 用 Action Expert 权重初始化 Kpt Expert | Kpt Expert 从有意义的 attention 权重启动，比随机初始化收敛快 | `IA15Cfg[PC]:489` |
 | **训练策略** | | | | |
 | `train_expert_only` | `true` | 只训练 expert，冻结 VLM | Warmup 目标是预热 kpt 分支，VLM 的视觉特征在 Phase 2 再适配 | `IA15Cfg[PC]:417` |
@@ -471,19 +473,68 @@ LR
 - Kpt Expert 和 TrackEncoder 峰值 $5\times10^{-5}$，终止 $5\times10^{-6}$
 - Action Expert 峰值 $2\times10^{-6}$ (= $5\times10^{-5} \times 0.04$)，终止 $2\times10^{-7}$ (= $5\times10^{-6} \times 0.04$)
 
-### 7.3 GeoPredict 权重加载行为
+### 7.3 GeoPredict TrackEncoder 权重加载行为
 
-GeoPredict RoboCasa 预训练权重 (`GeoPredict_robocasa.pth`) 在模型初始化阶段加载到 TrackEncoder。由于:
+> **代码出处**: `src/lerobot/policies/internvla_a1_5/keypoints.py` — `geopredict_track_encoder_input_compatible()` + `load_geopredict_track_encoder_weights()`；由 `modeling_internvla_a1_5.py::load_geopredict_keypoint_weights()` 在 `__init__` 末尾调用（仅当 `config.geopredict_checkpoint_path` 非空时）。
 
-- 预训练 TrackEncoder 的 Conv1d 输入维度为 **3** (3D position only)
-- 本方案的 TrackEncoder 输入维度为 **7** (7D pos+quat, `kpt_4d_mode=pos_rot`)
+#### 7.3.1 触发条件
 
-加载时使用 `strict=False`，行为为:
-- **形状匹配的层** (中间 attention、MLP): 成功加载预训练权重
-- **形状不匹配的首层 Conv1d** (input_dim 3→7): 跳过，**随机初始化**
-- 首层需要在 Warmup 中从零学习 7D→embedding 的投影
+Launch 脚本仍传 `--policy.geopredict_checkpoint_path="${GEOPREDICT_CKPT}"`，但**是否真正加载**由 TrackEncoder 输入维度与 checkpoint 的 shape 兼容性决定，**不是**只要传了路径就一定加载。
 
-这与 R1Pro warmup 的行为一致 (`b/d/R1Pro/p2sft_planH200_0904LOG.md` §1)。
+判断逻辑（`geopredict_track_encoder_input_compatible()`）：
+
+| 条件 | 行为 |
+|:---|:---|
+| `TrackEncoder.input_dim == 3`（`kpt_4d_mode=pos_only`） | **加载** GeoPredict 权重（选择性加载，见下） |
+| `input_dim != 3`，但 checkpoint 中 `point_patch_embed.conv.weight` shape 与当前 TrackEncoder **完全一致** | **加载**（例如将来有 7D GeoPredict ckpt 时） |
+| 以上均不满足（**Franka 7D 典型情况**：ckpt 为 `(256,3,4)`，模型为 `(256,7,4)`） | **整网不加载**，TrackEncoder **全部保持随机初始化** |
+
+不兼容时日志会出现 **warning**（即使用户已传入 `geopredict_checkpoint_path`）：
+
+```text
+GeoPredict TrackEncoder weights were NOT loaded from ...: TrackEncoder input shape is incompatible ...
+The entire TrackEncoder will remain randomly initialized.
+```
+
+这是**预期行为**，不是错误。Franka 7D Warmup 仍依赖 `init_kpt_expert_from_action=true` + Warmup 训练步数让 kpt 分支收敛；TrackEncoder 在 Phase 1 从零学习 7D→embedding 映射。
+
+#### 7.3.2 兼容时如何加载（3D / shape 匹配）
+
+GeoPredict RoboCasa 预训练权重 (`GeoPredict_robocasa.pth`) 在**通过兼容性检查后**，对 TrackEncoder 做**选择性加载**：
+
+- **加载**: `queries`、`point_patch_embed`、`cross_attention_block`、`linear_transform`、`final_norm`
+- **不加载**: `track_fusion_layer`（GeoPredict 512→2048 vs 本仓库 512→1024，shape 不同，始终 skip）
+- **逐层校验**: 每个可加载参数的 shape 必须与 checkpoint 一致，否则 `RuntimeError`
+
+RoboTwin / R1Pro 3D 迁移（`input_dim=3`）走此路径，日志类似 `loaded 26 keys, skipped 2 (track_fusion_layer)`。
+
+#### 7.3.3 Franka 7D 与 R1Pro 7D 的差异
+
+| 场景 | `kpt_4d_mode` | GeoPredict 加载 | TrackEncoder 初始化 |
+|:---|:---|:---|:---|
+| RoboTwin / R1Pro 3D Phase 1 | `pos_only` | ✅ 选择性加载 | GeoPredict 中间层 + 随机 fusion |
+| **Franka 插插座 Phase 1** | `pos_rot` | ❌ 输入不兼容 | **整网随机 init** + warning |
+| R1Pro 电梯 7D Phase 1 | `pos_rot` | ❌ 同上 | **整网随机 init** + warning |
+| Phase 2 SFT（任意） | — | 不设 `geopredict_checkpoint_path` | 从 Phase 1 ckpt 恢复 |
+
+#### 7.3.4 初始化流水线（Stage 3 + Stage 4）
+
+```mermaid
+flowchart TD
+    A["TrackEncoder() 构造<br/>PyTorch 默认随机 init"] --> B{"init_kpt_expert_from_action?"}
+    B -->|是| C["keypoint_expert ← action_expert"]
+    B -->|否| D["keypoint_expert 保持随机"]
+    C --> E{"geopredict_checkpoint_path 非空?"}
+    D --> E
+    E -->|否| F["结束"]
+    E -->|是| G{"input_dim==3 或 conv shape 匹配?"}
+    G -->|是| H["load_geopredict_track_encoder_weights<br/>选择性加载"]
+    G -->|否| I["warning + 整网保持随机 init"]
+    H --> F
+    I --> F
+```
+
+> **历史说明**: 2026-09-07 曾用「部分加载 + `strict_shape_check=False` + `shape_skipped_sub_keys`」绕过 7D shape 不匹配；该方案已废弃，统一为上述「兼容则加载 / 不兼容则整网随机 init」逻辑（见 `plug_p1warmup_0907LOG.md` §1.1 后续修订说明）。
 
 ---
 
@@ -992,7 +1043,7 @@ print('Checkpoint config OK: kpt=true, J=8, mode=pos_rot')
 
 | 异常 | 判定 | 应对 |
 |:---|:---|:---|
-| kpt_cur > 0.01 在 epoch 3 之后 | kpt expert 未收敛 | 检查 `init_kpt_expert_from_action=true` 和 `geopredict_checkpoint_path` 是否正确设置 |
+| kpt_cur > 0.01 在 epoch 3 之后 | kpt expert 未收敛 | 检查 `init_kpt_expert_from_action=true`；7D 下 GeoPredict 不加载属正常，看 warning 而非 loaded keys |
 | loss_action 持续 > 1.0 | action expert 异常 | 检查 `pretrained_path` 是否指向 A1.5-base |
 | grad_norm 持续 > 1000 | 梯度爆炸 | 降低 `kpt_loss_weight` 到 5.0 或增大 `scheduler_warmup_steps` |
 | 训练卡死 (日志 15 分钟无更新) | NCCL 或 I/O 挂起 | wrapper 自动检测并归档 |
@@ -1012,7 +1063,8 @@ print('Checkpoint config OK: kpt=true, J=8, mode=pos_rot')
 | `FileExistsError: Output directory already exists` | 事先 `mkdir` 了 OUTPUT_DIR | 不要预创建 OUTPUT_DIR，让训练脚本自动创建 |
 | `video_decode_error > 0` | torchcodec / libnpp 缺失 | 检查 `LD_LIBRARY_PATH` 含 `nvidia/npp/lib` |
 | Smoke 通过但 8 GPU 报 NCCL | `NCCL_TUNER_PLUGIN=""` 在某些 NCCL 版本不阻止自动检测 | 改为 `NCCL_TUNER_PLUGIN="/dev/null"` |
-| loss_kpt_cur 不下降 | GeoPredict 权重未加载或 init_kpt_expert_from_action 未设 | 检查日志中的 missing/unexpected keys 信息 |
+| loss_kpt_cur 不下降 | kpt expert 未正确初始化或 LR 不当 | 检查 `init_kpt_expert_from_action=true`；7D 下 TrackEncoder 随机 init 是预期，勿因无 GeoPredict loaded keys 误判为失败 |
+| 日志出现 GeoPredict NOT loaded ... randomly initialized | Franka/R1Pro 7D + 3D GeoPredict ckpt | **预期 warning**，非故障；TrackEncoder 整网随机 init，Warmup 继续训练即可 |
 | 训练后 checkpoint 配置中 kpt_4d_mode 缺失 | 代码版本错误 | 确认 editable install 指向含 7D 支持的代码 |
 | bigmatrix 启动失败 | CUDA OOM 或 Python 版本不兼容 | 检查 GPU 是否真正空闲，用 `python3` 替代 `python` |
 

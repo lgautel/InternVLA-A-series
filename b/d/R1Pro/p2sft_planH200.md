@@ -707,7 +707,7 @@ Phase 2 必须从 **Phase 1 Warmup 产出的 ckpt@400** 出发。本机当前没
 | 配置项 | 值 | 说明 |
 |:---|:---|:---|
 | `pretrained_path` | InternVLA-A1.5-base | 基础权重 |
-| `geopredict_checkpoint_path` | GeoPredict_robocasa.pth | TrackEncoder 初始化 |
+| `geopredict_checkpoint_path` | GeoPredict_robocasa.pth（CLI 可选） | 仅 `input_dim=3` 或 conv shape 匹配时加载 TrackEncoder；7D 电梯任务传了也只会 warning + 随机 init（见 `r1pro_migration_design.md` §6.5） |
 | `train_expert_only` | true | VLM 冻结 |
 | `action_loss_only` | true | 不加载 WAN |
 | `init_kpt_expert_from_action` | true | Kpt Expert 从 Action Expert 拷贝 |

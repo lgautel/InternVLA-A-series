@@ -179,3 +179,38 @@ class TestSelectiveLoading:
         assert torch.allclose(
             encoder.point_patch_embed.conv.weight, geo_encoder.point_patch_embed.conv.weight
         )
+
+    def test_load_geopredict_skips_entire_encoder_when_input_dim_incompatible(self, tmp_path, caplog):
+        """7D TrackEncoder with 3D GeoPredict checkpoint must stay fully random."""
+        import logging
+
+        from lerobot.policies.internvla_a1_5.keypoints import (
+            TrackEncoder,
+            load_geopredict_track_encoder_weights,
+        )
+
+        geo_encoder = TrackEncoder(
+            input_dim=3, output_dim=64, num_queries=1,
+            patch_size=2, embed_dim=16, query_dim=32,
+            num_heads=2, ff_dim=64, max_seq_len=50,
+        )
+        state_dict = {f"keypoint_encoder.{k}": v for k, v in geo_encoder.state_dict().items()}
+        ckpt_path = tmp_path / "geopredict_3d_mock.pth"
+        torch.save(state_dict, ckpt_path)
+
+        encoder = TrackEncoder(
+            input_dim=7, output_dim=32, num_queries=1,
+            patch_size=2, embed_dim=16, query_dim=32,
+            num_heads=2, ff_dim=64, max_seq_len=50,
+        )
+        before = {k: v.clone() for k, v in encoder.state_dict().items()}
+
+        with caplog.at_level(logging.WARNING):
+            loaded_keys, skipped_keys = load_geopredict_track_encoder_weights(encoder, str(ckpt_path))
+
+        assert loaded_keys == []
+        assert skipped_keys == []
+        for key, tensor in encoder.state_dict().items():
+            assert torch.allclose(tensor, before[key]), key
+        assert any("NOT loaded" in record.message for record in caplog.records)
+        assert any("randomly initialized" in record.message for record in caplog.records)

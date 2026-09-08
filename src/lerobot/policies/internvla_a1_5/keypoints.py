@@ -15,6 +15,8 @@ Adaptations relative to the original GeoPredict implementation:
     - Added :func:`load_geopredict_track_encoder_weights` for selective (shape-checked)
       weight loading from a GeoPredict checkpoint, since ``track_fusion_layer`` output_dim
       differs (512->2048 in GeoPredict vs 512->1024 here) and therefore cannot be reused.
+    - GeoPredict loading is skipped entirely when ``TrackEncoder`` input_dim != 3 and the
+      checkpoint input projection shape does not match (e.g. 7D ``pos_rot`` with 3D GeoPredict).
 """
 
 from __future__ import annotations
@@ -327,9 +329,50 @@ _LOADABLE_SUBMODULE_PREFIXES = (
     "final_norm.",
 )
 
+def _read_geopredict_checkpoint_state(checkpoint_path: str) -> dict[str, torch.Tensor]:
+    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if isinstance(raw, dict) and "state_dict" in raw:
+        raw = raw["state_dict"]
+    elif isinstance(raw, dict) and "model" in raw:
+        raw = raw["model"]
+    if not isinstance(raw, dict):
+        raise ValueError(f"GeoPredict checkpoint at {checkpoint_path!r} is not a state dict.")
+    return raw
+
+_GEOPREDICT_CONV_WEIGHT_KEY = f"{_GEOPREDICT_TRACK_ENCODER_PREFIX}point_patch_embed.conv.weight"
+def geopredict_track_encoder_input_compatible(
+    track_encoder: TrackEncoder, checkpoint_state: dict[str, torch.Tensor]
+) -> tuple[bool, str]:
+    """Return whether GeoPredict checkpoint weights may initialize ``track_encoder``.
+
+    Loading is allowed when either:
+      - ``TrackEncoder`` uses the original GeoPredict 3D input (``input_dim == 3``), or
+      - the checkpoint's ``point_patch_embed.conv.weight`` shape matches the target encoder.
+
+    Otherwise the entire TrackEncoder should remain randomly initialized.
+    """
+    input_dim = track_encoder.point_patch_embed.conv.in_channels
+    if input_dim == 3:
+        return True, ""
+
+    if _GEOPREDICT_CONV_WEIGHT_KEY not in checkpoint_state:
+        return False, f"checkpoint missing {_GEOPREDICT_CONV_WEIGHT_KEY}"
+
+    ckpt_shape = tuple(checkpoint_state[_GEOPREDICT_CONV_WEIGHT_KEY].shape)
+    dst_shape = tuple(track_encoder.point_patch_embed.conv.weight.shape)
+    if ckpt_shape == dst_shape:
+        return True, ""
+
+    return (
+        False,
+        "TrackEncoder input shape is incompatible with GeoPredict checkpoint "
+        f"(point_patch_embed.conv.weight checkpoint {ckpt_shape} vs target {dst_shape}, "
+        f"input_dim={input_dim})",
+    )
+
 
 def load_geopredict_track_encoder_weights(
-    track_encoder: TrackEncoder, checkpoint_path: str, strict_shape_check: bool = True
+    track_encoder: TrackEncoder, checkpoint_path: str
 ) -> tuple[list[str], list[str]]:
     """Selectively load a :class:`TrackEncoder`'s weights from a GeoPredict checkpoint.
 
@@ -338,23 +381,30 @@ def load_geopredict_track_encoder_weights(
     cross-attention block, ``linear_transform`` and ``final_norm``. ``track_fusion_layer`` is
     always skipped because its output dimension (and therefore weight shape) differs.
 
+    If the checkpoint's input projection shape is incompatible with the target ``TrackEncoder``
+    (e.g. GeoPredict 3D weights with ``input_dim=7``), **no** GeoPredict weights are loaded and
+    the encoder remains fully randomly initialized. A warning is logged in that case.
+
     Args:
         track_encoder: the (already constructed) :class:`TrackEncoder` instance to load into.
         checkpoint_path: path to a GeoPredict ``.pth`` checkpoint (a plain ``state_dict``, or a
             dict containing one under a ``"state_dict"``/``"model"`` key).
-        strict_shape_check: if True, raise if a key that *should* be loadable (i.e. matches one
-            of the loadable prefixes) has a mismatched shape, instead of silently skipping it.
 
     Returns:
         ``(loaded_keys, skipped_keys)`` — the list of keys copied into ``track_encoder``, and the
         list of keys found in the checkpoint under the ``keypoint_encoder.`` prefix that were
         intentionally skipped (e.g. ``track_fusion_layer``).
     """
-    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if isinstance(raw, dict) and "state_dict" in raw:
-        raw = raw["state_dict"]
-    elif isinstance(raw, dict) and "model" in raw:
-        raw = raw["model"]
+    raw = _read_geopredict_checkpoint_state(checkpoint_path)
+    compatible, reason = geopredict_track_encoder_input_compatible(track_encoder, raw)
+    if not compatible:
+        logger.warning(
+            "GeoPredict TrackEncoder weights were NOT loaded from %s: %s "
+            "The entire TrackEncoder will remain randomly initialized.",
+            checkpoint_path,
+            reason,
+        )
+        return [], []
 
     dst_state = track_encoder.state_dict()
     new_state = {}
@@ -377,15 +427,10 @@ def load_geopredict_track_encoder_weights(
             continue
 
         if tuple(tensor.shape) != tuple(dst_state[sub_key].shape):
-            msg = (
+            raise RuntimeError(
                 f"Shape mismatch for {full_key}: checkpoint {tuple(tensor.shape)} vs "
                 f"TrackEncoder {tuple(dst_state[sub_key].shape)}"
             )
-            if strict_shape_check:
-                raise RuntimeError(msg)
-            logger.warning("%s — skipping.", msg)
-            skipped_keys.append(full_key)
-            continue
 
         new_state[sub_key] = tensor
         loaded_keys.append(full_key)
