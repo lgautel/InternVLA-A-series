@@ -1,0 +1,53 @@
+# EVT dual-arm mobile robot (Gento Luna upper body + YHS chassis)
+#
+# State  concat order: left_arm(7) + right_arm(7) + torso(6) + left_gripper(1) + right_gripper(1) + left_ee_force(6) + right_ee_force(6) + chassis_vel(3)  = 37
+# Action concat order: left_arm(7) + right_arm(7) + torso(6) + left_gripper(1) + right_gripper(1) + chassis_vel(3)  = 25
+# Both reorder to canonical layout: left_arm(7) left_gripper(1) right_arm(7) right_gripper(1) | torso(6) ...
+robot_type: evt
+
+# Given in feature_mapping concat order (DeltaActionTransformFn runs before reorder).
+# Positive = delta action, negative = absolute action.
+# Arms and torso use delta; grippers and chassis velocities stay absolute.
+action_mask_spec: [7, 7, 6, -1, -1, -3]
+
+# [src_start, src_end, dst_start, dst_end]
+action_reorder:
+  - [0, 7, 0, 7]      # left_arm:       src[0:7]   -> dst[0:7]
+  - [20, 21, 7, 8]    # left_gripper:   src[20:21] -> dst[7:8]
+  - [7, 14, 8, 15]    # right_arm:      src[7:14]  -> dst[8:15]
+  - [21, 22, 15, 16]  # right_gripper:  src[21:22] -> dst[15:16]
+  - [14, 20, 16, 22]  # torso:          src[14:20] -> dst[16:22]
+  - [22, 25, 22, 25]  # chassis_vel:    src[22:25] -> dst[22:25]
+
+state_reorder:
+  - [0, 7, 0, 7]      # left_arm
+  - [20, 21, 7, 8]    # left_gripper
+  - [7, 14, 8, 15]    # right_arm
+  - [21, 22, 15, 16]  # right_gripper
+  - [14, 20, 16, 22]  # torso
+  - [22, 28, 22, 28]  # left_ee_force
+  - [28, 34, 28, 34]  # right_ee_force
+  - [34, 37, 34, 37]  # chassis_vel
+
+feature_mapping:
+  observation.state:
+    - observation.state.left_arm        # [7]
+    - observation.state.right_arm       # [7]
+    - observation.state.torso           # [6]
+    - observation.state.left_gripper    # [1]
+    - observation.state.right_gripper   # [1]
+    - observation.state.left_ee_force   # [6]
+    - observation.state.right_ee_force  # [6]
+    - observation.state.chassis_vel     # [3]
+  action:
+    - action.left_arm                   # [7]
+    - action.right_arm                  # [7]
+    - action.torso                      # [6]
+    - action.left_gripper               # [1]
+    - action.right_gripper              # [1]
+    - action.chassis_vel                # [3]
+
+image_mapping:
+  observation.images.head_rgb: observation.images.image0
+
+description: "EVT dual-arm mobile robot (arms + torso + grippers + force sensors + chassis)"
