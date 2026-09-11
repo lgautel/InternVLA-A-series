@@ -103,9 +103,15 @@ class WanVideoModel(nn.Module):
             config_path = checkpoint_path
 
         config_json_path = os.path.join(config_path, 'config.json')
-        if os.path.exists(config_json_path):
-            with open(config_json_path, 'r') as f:
-                model_config = json.load(f)
+        if not os.path.exists(config_json_path):
+            raise FileNotFoundError(
+                f"WAN config.json not found at {config_json_path}. "
+                f"Download Wan2.2-TI2V-5B first, e.g.:\n"
+                f"  huggingface-cli download Wan-AI/Wan2.2-TI2V-5B "
+                f"--local-dir {config_path}"
+            )
+        with open(config_json_path, 'r') as f:
+            model_config = json.load(f)
 
         model = cls(
             model_config=model_config,

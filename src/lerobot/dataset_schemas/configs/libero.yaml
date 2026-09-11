@@ -16,7 +16,7 @@
       - action
   image_mapping:
     observation.images.image: observation.images.image0
-    observation.images.wrist_image: observation.images.image1
+    observation.images.image2: observation.images.image1
   action_mask_spec: [6, -1]
   action_mode: end_effector
   description: "LIBERO-10 (agentview + wrist cameras, 7D EE delta + gripper)"
@@ -29,7 +29,7 @@
       - action
   image_mapping:
     observation.images.image: observation.images.image0
-    observation.images.wrist_image: observation.images.image1
+    observation.images.image2: observation.images.image1
   action_mask_spec: [6, -1]
   action_mode: end_effector
   description: "LIBERO-goal (agentview + wrist cameras, 7D EE delta + gripper)"
@@ -42,7 +42,7 @@
       - action
   image_mapping:
     observation.images.image: observation.images.image0
-    observation.images.wrist_image: observation.images.image1
+    observation.images.image2: observation.images.image1
   action_mask_spec: [6, -1]
   action_mode: end_effector
   description: "LIBERO-object (agentview + wrist cameras, 7D EE delta + gripper)"
@@ -55,7 +55,7 @@
       - action
   image_mapping:
     observation.images.image: observation.images.image0
-    observation.images.wrist_image: observation.images.image1
+    observation.images.image2: observation.images.image1
   action_mask_spec: [6, -1]
   action_mode: end_effector
   description: "LIBERO-spatial (agentview + wrist cameras, 7D EE delta + gripper)"

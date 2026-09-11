@@ -26,6 +26,7 @@ This module provides utilities for:
 import logging
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import datasets
@@ -139,6 +140,15 @@ def delete_episodes(
     return new_dataset
 
 
+@dataclass
+class SplitDatasetResult:
+    """Lightweight handle for a locally materialized dataset split."""
+
+    repo_id: str
+    root: Path
+    meta: LeRobotDatasetMetadata
+
+
 def split_dataset(
     dataset: LeRobotDataset,
     splits: dict[str, float | list[int]],
@@ -217,15 +227,24 @@ def split_dataset(
 
         _copy_and_reindex_episodes_metadata(dataset, new_meta, episode_mapping, data_metadata, video_metadata)
 
-        new_dataset = LeRobotDataset(
-            repo_id=split_repo_id,
-            root=split_output_dir,
-            image_transforms=dataset.image_transforms,
-            delta_timestamps=dataset.delta_timestamps,
-            tolerance_s=dataset.tolerance_s,
-        )
-
-        result_datasets[split_name] = new_dataset
+        if output_dir is not None:
+            # Local splits are not on the Hub; avoid LeRobotDataset init, which may
+            # attempt a hub download when the HF cache check fails on fresh writes.
+            refreshed_meta = LeRobotDatasetMetadata(repo_id=split_repo_id, root=split_output_dir)
+            result_datasets[split_name] = SplitDatasetResult(
+                repo_id=split_repo_id,
+                root=split_output_dir,
+                meta=refreshed_meta,
+            )
+        else:
+            new_dataset = LeRobotDataset(
+                repo_id=split_repo_id,
+                root=split_output_dir,
+                image_transforms=dataset.image_transforms,
+                delta_timestamps=dataset.delta_timestamps,
+                tolerance_s=dataset.tolerance_s,
+            )
+            result_datasets[split_name] = new_dataset
 
     return result_datasets
 
