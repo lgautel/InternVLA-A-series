@@ -1,2 +1,31 @@
 {
+
+    "claudeCode.environmentVariables": [
+        
+        {
+            "name": "CLAUDE_CODE_USE_VERTEX",
+            "value": "1"
+        },
+        {
+            "name": "CLOUD_ML_REGION",
+            "value": "global"
+        },
+        {
+            "name": "ANTHROPIC_VERTEX_PROJECT_ID",
+            "value": "autel-ai-physical-spat-intel"
+        },
+        {
+            "name": "ANTHROPIC_MODEL",
+            "value": "claude-opus-4-6"
+        },
+        {
+            "name": "DISABLE_PROMPT_CACHING",
+            "value": "0"
+        },
+        {
+            "name": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "value": "claude-opus-4-6"
+        }
+    ],
+    "claudeCode.allowDangerouslySkipPermissions": true
 }
