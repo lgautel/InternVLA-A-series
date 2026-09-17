@@ -113,20 +113,6 @@ def _load_id2category(task_classification_path: str, suite: str) -> tuple[dict[i
     return id2category, disturb_res
 
 
-def _parse_categories(categories_arg: str | None) -> set[str] | None:
-    """Parse a comma-separated --categories filter into a set of category names.
-
-    Returns None when no filter is requested (evaluate every category, the
-    original/default behavior). Category names must match the `category`
-    field values in task_classification.json exactly, e.g. "Camera Viewpoints"
-    or "Robot Initial States".
-    """
-    if not categories_arg:
-        return None
-    categories = {c.strip() for c in categories_arg.split(",") if c.strip()}
-    return categories or None
-
-
 def evaluate_policy(args: argparse.Namespace, client: LiberoModelClient) -> dict:
     from libero.libero import benchmark
 
@@ -149,26 +135,11 @@ def evaluate_policy(args: argparse.Namespace, client: LiberoModelClient) -> dict
     # JSON id == env task_id + 1.
     id2category, disturb_res = _load_id2category(args.task_classification_path, args.task_suite_name)
 
-    categories_filter = _parse_categories(args.categories)
-    if categories_filter is not None:
-        unknown = categories_filter - set(disturb_res.keys())
-        if unknown:
-            raise ValueError(
-                f"--categories has unknown categories {sorted(unknown)}. "
-                f"Available for suite '{args.task_suite_name}': {sorted(disturb_res.keys())}"
-            )
-
     max_steps = args.max_steps_override if args.max_steps_override > 0 else TASK_SUITE_MAX_STEPS[args.task_suite_name]
 
-    n_selected = sum(
-        1 for task_id in range(start_idx, end_idx)
-        if categories_filter is None or id2category[task_id + 1][0] in categories_filter
-    )
     LOGGER.info(
-        "Suite=%s | shard [%d, %d) of %d tasks | categories=%s -> %d/%d tasks selected | max_steps=%d | trials/task=%d",
-        args.task_suite_name, start_idx, end_idx, n_tasks_in_suite,
-        sorted(categories_filter) if categories_filter else "ALL",
-        n_selected, end_idx - start_idx, max_steps, args.num_trials_per_task,
+        "Suite=%s | shard [%d, %d) of %d tasks | max_steps=%d | trials/task=%d",
+        args.task_suite_name, start_idx, end_idx, n_tasks_in_suite, max_steps, args.num_trials_per_task,
     )
 
     eval_log_dir = Path(args.eval_log_dir)
@@ -183,8 +154,6 @@ def evaluate_policy(args: argparse.Namespace, client: LiberoModelClient) -> dict
 
     for task_id in tqdm(range(start_idx, end_idx), desc=f"{args.task_suite_name}[{start_idx}:{end_idx}]"):
         category, clean_name = id2category[task_id + 1]
-        if categories_filter is not None and category not in categories_filter:
-            continue
         task = task_suite.get_task(task_id)
         initial_states = task_suite.get_task_init_states(task_id)
         successes, task_desc = evaluate_task(
@@ -257,18 +226,6 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="If > 0, override the per-suite max_steps.",
     )
-    parser.add_argument(
-        "--categories",
-        type=str,
-        default=None,
-        help=(
-            "Comma-separated perturbation-category filter, e.g. "
-            "'Camera Viewpoints,Robot Initial States'. Task ids whose category "
-            "(from task_classification.json) is not in this set are skipped "
-            "entirely (no simulation, no accounting). Default: evaluate all "
-            "7 categories (original behavior)."
-        ),
-    )
 
     parser.add_argument("--eval_log_dir", type=str, default="outputs/sim_eval/libero_plus")
     parser.add_argument("--save_videos", action=argparse.BooleanOptionalAction, default=True)
@@ -287,6 +244,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    print(
+        "WARNING: legacy evaluation/LIBERO-plus/eval_libero_plus.py. "
+        "Use evaluation/LIBERO-plus2/eval_libero_plus.py "
+        "(rotate_images defaults False; this entry still defaults True).",
+        file=sys.stderr,
+    )
     args = parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,

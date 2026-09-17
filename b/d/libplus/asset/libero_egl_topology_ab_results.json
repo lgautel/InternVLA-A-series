@@ -1,0 +1,70 @@
+{
+  "date": "2026-09-16",
+  "hardware": {
+    "server_gpus": [0, 1],
+    "client_gpus": [2, 3, 4, 5, 6, 7],
+    "render_backend": "egl",
+    "inference_backend": "standard"
+  },
+  "workload": {
+    "suites": [
+      "libero_spatial",
+      "libero_object",
+      "libero_goal",
+      "libero_10"
+    ],
+    "task_definitions": 24,
+    "tasks_per_suite": 6,
+    "episodes_per_task": 5,
+    "episodes_per_topology": 120,
+    "checkpoint": "LIBERO-compatible step 032070"
+  },
+  "ab": {
+    "two_server": {
+      "server_instances": 2,
+      "server_instances_per_gpu": 1,
+      "total_episodes": 120,
+      "successful_episodes": 115,
+      "success_rate": 0.9583333333,
+      "server_ready_seconds": 40.669,
+      "client_wall_seconds": 712.065,
+      "end_to_end_seconds": 753.01,
+      "missing_result_jsons": 0,
+      "crash_hits": 0,
+      "passed": true
+    },
+    "six_server": {
+      "server_instances": 6,
+      "server_instances_per_gpu": 3,
+      "total_episodes": 120,
+      "successful_episodes": 114,
+      "success_rate": 0.95,
+      "server_ready_seconds": 87.936,
+      "client_wall_seconds": 512.169,
+      "end_to_end_seconds": 600.436,
+      "missing_result_jsons": 0,
+      "crash_hits": 0,
+      "passed": true
+    },
+    "comparison": {
+      "six_minus_two_client_wall_seconds": -199.896,
+      "six_over_two_client_wall_ratio": 0.7193,
+      "client_wall_speedup_percent": 28.07,
+      "end_to_end_speedup_percent": 20.26,
+      "stability_winner": "tie: both had zero crash or missing-result events",
+      "policy_success_rate_difference_is_not_a_topology_metric": true
+    }
+  },
+  "production_launcher_six_server_smoke": {
+    "launcher": "run_eval_libero_plus_2server_6client_venv.sh",
+    "server_instances_per_gpu": 3,
+    "tasks": 6,
+    "episodes": 6,
+    "max_steps_override": 20,
+    "completed_clients": 6,
+    "crash_hits": 0,
+    "missing_result_jsons": 0,
+    "passed": true,
+    "note": "This is a plumbing/stability smoke; zero policy successes is expected with a 20-step cap and is not a benchmark result."
+  }
+}

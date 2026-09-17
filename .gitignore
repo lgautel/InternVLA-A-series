@@ -189,3 +189,6 @@ ckpt/
 ckpts/
 outputs-*
 .vscode/
+smoke_test_logs/libero_config/config.yaml
+smoke_test_logs/smoke2/actions/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_table_15_ep0.npz
+smoke_test_logs/smoke_results/actions/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_table_1_ep0.npz

@@ -1,0 +1,40 @@
+{
+  "passed": true,
+  "task": "libero_spatial original (unperturbed BDDL)",
+  "seed": 7,
+  "cameras": {
+    "agentview": {
+      "mse_live_raw_vs_train": 550.9,
+      "mse_live_rot180_vs_train": 6037.7,
+      "ratio_rot_over_raw": 10.959,
+      "control_train_vs_train": 0.0,
+      "control_train_rot180_vs_train": 6017.1,
+      "majority_vote": {
+        "prefer_raw": 80,
+        "prefer_rot180": 0,
+        "n": 80
+      },
+      "best_train_index": 0,
+      "matches_raw": true,
+      "min_ratio": 5.0,
+      "verdict": "train matches LIVE RAW (do not rotate)"
+    },
+    "wrist": {
+      "mse_live_raw_vs_train": 1219.9,
+      "mse_live_rot180_vs_train": 8018.2,
+      "ratio_rot_over_raw": 6.573,
+      "control_train_vs_train": 135.4,
+      "control_train_rot180_vs_train": 7796.8,
+      "majority_vote": {
+        "prefer_raw": 80,
+        "prefer_rot180": 0,
+        "n": 80
+      },
+      "best_train_index": 2,
+      "matches_raw": true,
+      "min_ratio": 5.0,
+      "verdict": "train matches LIVE RAW (do not rotate)"
+    }
+  },
+  "render_backend": "osmesa"
+}

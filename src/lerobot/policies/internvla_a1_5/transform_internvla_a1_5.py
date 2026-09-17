@@ -139,7 +139,10 @@ class InternVLAA15ChatProcessorTransformFn(DataTransformFn):
             label_mode = LABEL_MODE_NONE
         if self.mode == "eval":
             label_mode = LABEL_MODE_NONE
-            user_text = user_text + "; Output: <Subtask, Action>"
+            if self.use_fast_action_tokens:
+                user_text = user_text + "; Output: <Action>"
+            else:
+                user_text = user_text + "; Output: <SubTask, Action>"
 
         # Build assistant text
         if label_mode == LABEL_MODE_BOTH:

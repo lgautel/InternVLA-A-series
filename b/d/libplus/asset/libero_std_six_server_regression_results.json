@@ -1,0 +1,98 @@
+{
+  "description": "Acceptance evidence for the six-server-as-default standard-deployment plan (eval3_optim3.md \u00a7\u4e8c\u5341). Collected on the same 8xH200 container, checkpoint, and venvs used throughout b/d/libplus/libero_egl_slut.md.",
+  "checkpoint": "/home/a26113/b/Ckp/4dwvlaOpvlaLibplusKpt0911/2026_09_12_08_52_49-internvla_a1_5-libplus-sft/checkpoints/032070/pretrained_model",
+  "vlm_model_path": "/B/VENV/hf_home/hub/models--Qwen--Qwen3.5-2B/snapshots/15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "libero_home": "/home/a26113/DATA/LIBERO-plus",
+  "server_venv": "/B/VENV/itnvla15rbt20",
+  "client_venv": "/B/VENV/libero_plus_client",
+  "topology": "six servers (SERVER_INSTANCES_PER_GPU=3), GPU 0/1 for servers, GPU 2-7 for EGL clients",
+  "runs": [
+    {
+      "name": "std_six_server_smoke",
+      "launcher": "evaluation/LIBERO2/run_eval_libero_std_2server_6client_venv.sh",
+      "command_env": {
+        "EVAL_MODE": "smoke",
+        "EVAL_LOG_DIR": "/tmp/libero_std_six_server_smoke",
+        "note": "NUM_TRIALS_PER_TASK left at its inherited-shell value of 1 (script default for smoke is 5; this run happened to inherit 1 from a stale exported var, which is itself informative: the launcher must be run in a clean shell or with NUM_TRIALS_PER_TASK explicitly set)"
+      },
+      "wall_clock": {
+        "server_start_to_healthcheck_pass_s": 76,
+        "client_wall_s": 158,
+        "end_to_end_s": 236.8
+      },
+      "result": {
+        "total_episodes": 8,
+        "total_successes": 8,
+        "success_rate": 1.0,
+        "crash_task_count": 0,
+        "num_result_json_files": 8,
+        "per_suite_episodes": 2
+      },
+      "verdict": "PASS - six model servers started, all six healthchecks passed, six EGL clients each rendered+inferred on an isolated physical GPU, all 8 shards produced a result JSON, aggregate_std_results.py summed correctly, threshold gate (50%) PASS."
+    },
+    {
+      "name": "std_six_server_medium_regression",
+      "launcher": "evaluation/LIBERO2/run_eval_libero_std_2server_6client_venv.sh",
+      "command_env": {
+        "EVAL_MODE": "smoke",
+        "SMOKE_END_IDX": 6,
+        "NUM_TRIALS_PER_TASK": 5,
+        "EVAL_LOG_DIR": "/tmp/libero_std_six_server_regression"
+      },
+      "purpose": "First real-model, multi-shard-per-client, multi-episode-per-shard regression for the standard-LIBERO six-server launcher. Each of the 6 clients sequentially processes 4 shards (one per suite), 5 episodes per shard, i.e. 20 episodes per client back-to-back in one EGL-rendering child process -- the exact failure mode ('SIGABRT after ~4 episodes') that motivated this whole investigation.",
+      "wall_clock": {
+        "server_start_to_healthcheck_pass_s": 83,
+        "client_wall_s": 537,
+        "end_to_end_s": 622.1
+      },
+      "result": {
+        "total_episodes": 120,
+        "total_successes": 111,
+        "success_rate": 0.925,
+        "crash_task_count": 0,
+        "num_result_json_files": 24,
+        "per_suite": {
+          "libero_spatial": {"episodes": 30, "successes": 30, "sr": 1.0, "shards": 6},
+          "libero_object": {"episodes": 30, "successes": 24, "sr": 0.8, "shards": 6},
+          "libero_goal": {"episodes": 30, "successes": 28, "sr": 0.9333, "shards": 6},
+          "libero_10": {"episodes": 30, "successes": 29, "sr": 0.9667, "shards": 6}
+        }
+      },
+      "verdict": "PASS - 120/120 episodes completed with a written result JSON (no lost episodes), 0 SIGABRT/SIGSEGV/CRASHED across all 24 client log files, aggregate_std_results.py crash_task_count=0, overall SR 92.5% (policy-quality number, not a topology-stability metric).",
+      "note_on_success_rate": "The per-suite SR spread (80%-100%) reflects normal task-to-task policy variance, not any renderer/topology defect: every episode that started also finished and wrote a result."
+    },
+    {
+      "name": "libero_plus_six_server_default_smoke",
+      "launcher": "evaluation/LIBERO-plus2/run_eval_libero_plus_2server_6client_venv.sh",
+      "command_env": {
+        "EVAL_MODE": "smoke",
+        "SMOKE_SUITE": "libero_spatial",
+        "SMOKE_TASKS": 6,
+        "MAX_STEPS_OVERRIDE": 20,
+        "NUM_TRIALS_PER_TASK": 1,
+        "SAVE_ACTIONS_FLAG": "--no-save_actions",
+        "EVAL_LOG_DIR": "/tmp/libero_plus_six_server_default_smoke",
+        "note": "SERVER_INSTANCES_PER_GPU intentionally left UNSET to confirm the new default (3, six servers) takes effect without any explicit override"
+      },
+      "purpose": "Regression-confirm that after flipping the launcher default from SERVER_INSTANCES_PER_GPU=1 to 3, the LIBERO-plus launcher still boots six servers and six clients correctly with zero explicit configuration.",
+      "wall_clock": {
+        "server_start_to_healthcheck_pass_s": 73,
+        "client_wall_s": 72,
+        "end_to_end_s": 149.0
+      },
+      "result": {
+        "num_result_json_files": 6,
+        "crash_hits": 0,
+        "leaderboard_summary_percent": "all 0.0 (MAX_STEPS_OVERRIDE=20 is too short to finish any task and libero_spatial task ids are outside every LIBERO-plus perturbation category, so this run intentionally cannot be read as a policy-quality signal)"
+      },
+      "verdict": "PASS - printed 'Server GPUs: 0,1 (3 instances/GPU)' confirming the new default, six healthchecks passed, six clients completed without any SIGABRT/SIGSEGV/CRASHED string in their logs, six result JSON files were written."
+    }
+  ],
+  "cross_reference": {
+    "prior_ab_evidence": "asset/libero_egl_topology_ab_results.json (24 task / 120 episode two-server vs six-server A/B: six-server client phase 28.1% faster, end-to-end 20.3% faster, both 0 crashes/0 missing results)",
+    "doc_sections": [
+      "eval3_optim3.md \u00a7\u4e8c\u5341 (standard six-server deployment playbook)",
+      "libero_egl_slut.md (original exploration record)"
+    ]
+  }
+}

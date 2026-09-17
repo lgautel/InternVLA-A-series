@@ -1,0 +1,72 @@
+{
+  "backend": "egl",
+  "requested_episodes": 10,
+  "completed_episodes": 10,
+  "returncode": 0,
+  "signal": "",
+  "wall_seconds": 24.6,
+  "seconds_per_episode": 2.46,
+  "episodes": [
+    {
+      "episode": 0,
+      "steps": 40,
+      "seconds": 1.57,
+      "checksum": 9777.5
+    },
+    {
+      "episode": 1,
+      "steps": 40,
+      "seconds": 1.55,
+      "checksum": 9802.443
+    },
+    {
+      "episode": 2,
+      "steps": 40,
+      "seconds": 1.51,
+      "checksum": 9774.409
+    },
+    {
+      "episode": 3,
+      "steps": 40,
+      "seconds": 1.54,
+      "checksum": 9829.383
+    },
+    {
+      "episode": 4,
+      "steps": 40,
+      "seconds": 1.52,
+      "checksum": 9819.461
+    },
+    {
+      "episode": 5,
+      "steps": 40,
+      "seconds": 1.55,
+      "checksum": 9890.327
+    },
+    {
+      "episode": 6,
+      "steps": 40,
+      "seconds": 1.52,
+      "checksum": 9742.238
+    },
+    {
+      "episode": 7,
+      "steps": 40,
+      "seconds": 1.54,
+      "checksum": 9775.833
+    },
+    {
+      "episode": 8,
+      "steps": 40,
+      "seconds": 1.52,
+      "checksum": 9769.248
+    },
+    {
+      "episode": 9,
+      "steps": 40,
+      "seconds": 1.53,
+      "checksum": 9826.438
+    }
+  ],
+  "passed": true
+}

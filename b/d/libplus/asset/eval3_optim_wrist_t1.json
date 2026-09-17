@@ -1,0 +1,44 @@
+{
+  "task": "libero_spatial original (unperturbed BDDL)",
+  "seed": 7,
+  "cameras": {
+    "agentview": {
+      "mse_live_raw_vs_train": 545.6,
+      "mse_live_rot180_vs_train": 6029.0,
+      "ratio_rot_over_raw": 11.051,
+      "edge_mse_raw": 232.7,
+      "edge_mse_rot180": 379.6,
+      "edge_ratio_rot_over_raw": 1.631,
+      "bottom_third_mean_train": 101.1,
+      "bottom_third_mean_raw": 103.2,
+      "bottom_third_mean_rot180": 150.7,
+      "control_train_vs_train": 0.0,
+      "control_train_rot180_vs_train": 6017.1,
+      "majority_vote": {
+        "prefer_raw": 80,
+        "prefer_rot180": 0,
+        "n": 80
+      },
+      "verdict": "train matches LIVE RAW (do not rotate)"
+    },
+    "wrist": {
+      "mse_live_raw_vs_train": 1228.1,
+      "mse_live_rot180_vs_train": 7992.9,
+      "ratio_rot_over_raw": 6.508,
+      "edge_mse_raw": 420.0,
+      "edge_mse_rot180": 456.6,
+      "edge_ratio_rot_over_raw": 1.087,
+      "bottom_third_mean_train": 140.8,
+      "bottom_third_mean_raw": 138.1,
+      "bottom_third_mean_rot180": 87.2,
+      "control_train_vs_train": 135.4,
+      "control_train_rot180_vs_train": 7796.8,
+      "majority_vote": {
+        "prefer_raw": 80,
+        "prefer_rot180": 0,
+        "n": 80
+      },
+      "verdict": "train matches LIVE RAW (do not rotate)"
+    }
+  }
+}

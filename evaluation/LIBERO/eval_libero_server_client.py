@@ -208,6 +208,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    print(
+        "WARNING: legacy evaluation/LIBERO/eval_libero_server_client.py. "
+        "For InternVLA-A1.5 + opvla_libero_merged_kpt use "
+        "evaluation/LIBERO2/eval_libero_std.py or evaluation/LIBERO-plus2/eval_libero_plus.py "
+        "(those default rotate_images=False; this entry still defaults True).",
+        file=sys.stderr,
+    )
     args = parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,

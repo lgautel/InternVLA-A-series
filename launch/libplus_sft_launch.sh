@@ -56,7 +56,7 @@ CKPT_ROOT="${CKPT_ROOT:-${HOME}/b/Ckp/${EXPR_NAME}}"
 LOG_ROOT="${LOG_ROOT:-/B/Log/${EXPR_NAME}}"
 
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-900}"
-STALE_THRESHOLD="${STALE_THRESHOLD:-900}"
+STALE_THRESHOLD="${STALE_THRESHOLD:-1800}"
 BIGMATRIX_SCRIPT="${BIGMATRIX_SCRIPT:-${PROJ_ROOT}/b/d/GpRbt/bigmatrix_multiply_optimization.py}"
 BIGMATRIX_MAX_RETRIES="${BIGMATRIX_MAX_RETRIES:-5}"
 MAX_RESUME_ATTEMPTS="${MAX_RESUME_ATTEMPTS:-0}"
@@ -96,7 +96,7 @@ else
     STEPS="${STEPS:-53450}"
     NUM_WORKERS="${NUM_WORKERS:-12}"
     SAVE_FREQ="${SAVE_FREQ:-5345}"
-    LOG_FREQ="${LOG_FREQ:-1000}"
+    LOG_FREQ="${LOG_FREQ:-100}"
     SCHEDULER_WARMUP="${SCHEDULER_WARMUP:-1000}"
     WANDB_ENABLE="${WANDB_ENABLE:-true}"
     JOB_SUFFIX="libplus-sft"
@@ -249,10 +249,51 @@ _monitor_log() {
     echo "${msg}" >> "${LOG_FILE}" 2>/dev/null || true
 }
 
-_is_log_stale() {
-    [[ ! -f "${LOG_FILE}" ]] && return 0
-    local age=$(( $(date +%s) - $(stat -c %Y "${LOG_FILE}") ))
-    [[ ${age} -gt ${STALE_THRESHOLD} ]]
+_parse_step_from_log() {
+    local raw
+    raw=$(grep -oE 'step:[0-9]+(\.[0-9]+)?K?' "${LOG_FILE}" 2>/dev/null | tail -1 | cut -d: -f2)
+    [[ -z "${raw}" ]] && return
+    if [[ "${raw}" == *K ]]; then
+        raw="${raw%K}"
+        awk -v s="${raw}" 'BEGIN { printf "%.0f\n", s * 1000 }'
+    else
+        awk -v s="${raw}" 'BEGIN { printf "%.0f\n", s }'
+    fi
+}
+
+_LAST_OBSERVED_STEP=""
+_STALL_COUNT=0
+_TRAIN_START_TIME=""
+
+_is_training_stalled() {
+    local cur_step
+    cur_step=$(_parse_step_from_log)
+
+    if [[ -z "${cur_step}" ]]; then
+        if [[ -n "${_TRAIN_START_TIME}" ]]; then
+            local elapsed=$(( $(date +%s) - _TRAIN_START_TIME ))
+            [[ ${elapsed} -gt ${STALE_THRESHOLD} ]]
+        else
+            return 1
+        fi
+        return
+    fi
+
+    if [[ "${cur_step}" == "${_LAST_OBSERVED_STEP}" ]]; then
+        _STALL_COUNT=$((_STALL_COUNT + 1))
+        [[ ${_STALL_COUNT} -ge 2 ]]
+        return
+    fi
+
+    _LAST_OBSERVED_STEP="${cur_step}"
+    _STALL_COUNT=0
+    return 1
+}
+
+_reset_stall_state() {
+    _LAST_OBSERVED_STEP=""
+    _STALL_COUNT=0
+    _TRAIN_START_TIME=$(date +%s)
 }
 
 _are_outputs_complete() {
@@ -261,15 +302,19 @@ _are_outputs_complete() {
     [[ -d "${OUTPUT_DIR}/checkpoints/${final_step}/pretrained_model" ]]
 }
 
+_LATEST_CKPT=""
 _find_latest_checkpoint() {
-    local ckpt_dir="${OUTPUT_DIR}/checkpoints"
-    if [[ ! -d "${ckpt_dir}" ]]; then
-        echo ""
+    _LATEST_CKPT=""
+    if [[ ! -d "${CKPT_ROOT}" ]]; then
         return
     fi
-    local latest
-    latest=$(ls -1d "${ckpt_dir}"/*/pretrained_model 2>/dev/null | sort -V | tail -1)
-    echo "${latest:-}"
+    _LATEST_CKPT=$(find "${CKPT_ROOT}" -path "*/checkpoints/*/pretrained_model" -type d 2>/dev/null | sort -V | tail -1)
+    if [[ -n "${_LATEST_CKPT}" ]]; then
+        local step_dir ckpts_dir
+        step_dir=$(dirname "${_LATEST_CKPT}")
+        ckpts_dir=$(dirname "${step_dir}")
+        OUTPUT_DIR=$(dirname "${ckpts_dir}")
+    fi
 }
 
 _kill_gpu_processes() {
@@ -326,8 +371,8 @@ _auto_recover() {
     local attempt=0
     while true; do
         attempt=$((attempt + 1))
-        local latest_ckpt
-        latest_ckpt=$(_find_latest_checkpoint)
+        _find_latest_checkpoint
+        local latest_ckpt="${_LATEST_CKPT}"
 
         _kill_gpu_processes
         pkill -f "bigmatrix_multiply" 2>/dev/null || true
@@ -337,6 +382,7 @@ _auto_recover() {
         recover_stamp=$(date +'%Y_%m_%d_%H_%M_%S')
         LOG_FILE="${LOG_ROOT}/${recover_stamp}/train.log"
         mkdir -p "$(dirname "${LOG_FILE}")"
+        _reset_stall_state
 
         if [[ -n "${latest_ckpt}" ]]; then
             _monitor_log "RECOVER: Resume from ${latest_ckpt} (attempt ${attempt})"
@@ -349,8 +395,22 @@ _auto_recover() {
                 --job_name="${JOB_NAME}" \
                 >> "${LOG_FILE}" 2>&1 &
         else
-            _monitor_log "RECOVER: No checkpoint — fresh start (attempt ${attempt})"
-            "${PYTHON}" -m accelerate.commands.launch "${ARGS[@]}" \
+            local recover_job_name="${recover_stamp}-${POLICY}-${JOB_SUFFIX}"
+            local recover_output_dir="${CKPT_ROOT}/${recover_job_name}"
+            OUTPUT_DIR="${recover_output_dir}"
+            _monitor_log "RECOVER: No checkpoint — fresh start (attempt ${attempt}), output_dir=${recover_output_dir}"
+            local fresh_args=()
+            local arg
+            for arg in "${ARGS[@]}"; do
+                if [[ "${arg}" == --output_dir=* ]]; then
+                    fresh_args+=("--output_dir=${recover_output_dir}")
+                elif [[ "${arg}" == --job_name=* ]]; then
+                    fresh_args+=("--job_name=${recover_job_name}")
+                else
+                    fresh_args+=("${arg}")
+                fi
+            done
+            "${PYTHON}" -m accelerate.commands.launch "${fresh_args[@]}" \
                 >> "${LOG_FILE}" 2>&1 &
         fi
         TRAIN_PID=$!
@@ -374,12 +434,12 @@ _auto_recover() {
 
             if [[ ${elapsed} -ge ${MONITOR_INTERVAL} ]]; then
                 elapsed=0
-                if _is_log_stale; then
-                    _monitor_log "RECOVER: log stale — retry"
+                if _is_training_stalled; then
+                    _monitor_log "RECOVER: training stalled (step=${_LAST_OBSERVED_STEP:-?} unchanged) — retry"
                     break
                 fi
                 local cur_step
-                cur_step=$(grep -oE 'step:[0-9]+' "${LOG_FILE}" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+                cur_step=$(_parse_step_from_log)
                 _monitor_log "RECOVER: step=${cur_step:-?}/${STEPS}"
             fi
         done
@@ -429,6 +489,7 @@ _monitor_log "OUTPUT_DIR=${OUTPUT_DIR} LOG=${LOG_FILE}"
 
 "${PYTHON}" -m accelerate.commands.launch "${ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
 TRAIN_PID=$!
+_reset_stall_state
 _monitor_log "Training PID=${TRAIN_PID}"
 
 _poll_sec=60
@@ -459,7 +520,8 @@ while true; do
 
     if [[ ${_elapsed} -ge ${MONITOR_INTERVAL} ]]; then
         _elapsed=0
-        if _is_log_stale; then
+        if _is_training_stalled; then
+            _monitor_log "STALL DETECTED: step=${_LAST_OBSERVED_STEP:-?} unchanged for $(((_STALL_COUNT) * MONITOR_INTERVAL))s"
             _archive_and_cleanup "_err"
             if _auto_recover; then
                 _archive_and_cleanup "_resumed"
@@ -467,7 +529,7 @@ while true; do
             fi
             break
         fi
-        cur_step=$(grep -oE 'step:[0-9]+' "${LOG_FILE}" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+        cur_step=$(_parse_step_from_log)
         _monitor_log "Healthy: step=${cur_step:-?}/${STEPS}"
     fi
 done

@@ -1,0 +1,7 @@
+{
+  "image_orientation": "raw",
+  "resize_hw": [224, 224],
+  "cameras": ["agentview", "wrist"],
+  "dataset_hint": "/B/Dta/opvla_libero_merged_kpt",
+  "notes": "Training mp4 frames are robosuite raw. Eval must send rotate_images=false for both cameras."
+}

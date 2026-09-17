@@ -1,0 +1,72 @@
+{
+  "backend": "osmesa",
+  "requested_episodes": 10,
+  "completed_episodes": 10,
+  "returncode": 0,
+  "signal": "",
+  "wall_seconds": 81.5,
+  "seconds_per_episode": 8.15,
+  "episodes": [
+    {
+      "episode": 0,
+      "steps": 40,
+      "seconds": 6.89,
+      "checksum": 9825.612
+    },
+    {
+      "episode": 1,
+      "steps": 40,
+      "seconds": 6.86,
+      "checksum": 9851.024
+    },
+    {
+      "episode": 2,
+      "steps": 40,
+      "seconds": 6.83,
+      "checksum": 9823.881
+    },
+    {
+      "episode": 3,
+      "steps": 40,
+      "seconds": 6.87,
+      "checksum": 9879.247
+    },
+    {
+      "episode": 4,
+      "steps": 40,
+      "seconds": 6.86,
+      "checksum": 9867.722
+    },
+    {
+      "episode": 5,
+      "steps": 40,
+      "seconds": 6.91,
+      "checksum": 9937.432
+    },
+    {
+      "episode": 6,
+      "steps": 40,
+      "seconds": 6.87,
+      "checksum": 9791.226
+    },
+    {
+      "episode": 7,
+      "steps": 40,
+      "seconds": 6.75,
+      "checksum": 9824.138
+    },
+    {
+      "episode": 8,
+      "steps": 40,
+      "seconds": 6.92,
+      "checksum": 9818.06
+    },
+    {
+      "episode": 9,
+      "steps": 40,
+      "seconds": 8.95,
+      "checksum": 9874.57
+    }
+  ],
+  "passed": true
+}

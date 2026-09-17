@@ -2404,3 +2404,402 @@ env.close()
 ### 10.4 小结
 
 > **本方案"不需要 URDF"，是因为 MuJoCo 原生使用 MJCF 格式。MJCF 就是本方案的机器人模型文件，与其他方案中 URDF 的地位完全等同。选择 MJCF + MuJoCo 而非 URDF + Pinocchio，是因为 LIBERO 数据由 MuJoCo 生成，用同一引擎做 FK 可获得 bit-exact 的结果，避免格式转换引入的误差。**
+
+---
+
+## 十一. 深入解析: `world_origin_isotropic_r_pad` 归一化
+
+> 本节详细解析 `observation.keypoint_3d` 字段使用的归一化方案，覆盖数学推导、设计动机、与其他方案的对比分析、以及在 LIBERO 数据上的具体应用.
+
+### 11.1 概述: 什么是 `world_origin_isotropic_r_pad`
+
+这个名称编码了三个设计决策:
+
+| 名称组成 | 含义 | 对比选项 |
+|----------|------|---------|
+| `world_origin` | 归一化的原点 = MuJoCo 世界坐标系原点 | `base_link_origin`（R1Pro 方案, 以机器人基座为原点） |
+| `isotropic` | 三个轴使用**同一个**缩放因子 | `anisotropic`（每个轴使用独立的缩放因子） |
+| `r_pad` | 缩放因子 = 全局包围半径 × (1+margin) | `auto_offset`（GeoPredict 方案, 平移到固定体素空间） |
+
+一句话总结: **以世界原点为中心, 用一个标量 $R_{\text{pad}}$ 对所有轴做等比例缩放, 使归一化后的 3D 位置落在 $[-1, 1]^3$ 内**.
+
+该归一化**仅作用于 `observation.keypoint_3d` 中每个关键点的位置分量** ($p_x, p_y, p_z$), 不作用于姿态四元数分量 ($q_x, q_y, q_z, q_w$), 也不作用于 `observation.state`、`action` 等其他字段.
+
+### 11.2 数学定义
+
+#### 11.2.1 两遍扫描流水线
+
+归一化需要全局统计量, 因此采用两遍扫描:
+
+**Pass 1 — 统计全局包围盒**:
+
+遍历数据集所有帧, 对每帧运行正运动学 (FK), 得到 $K$ 个关键点在世界坐标系下的 3D 位置, 累积全局极值:
+
+$$\mathbf{p}_{\min} = \min_{\substack{t \in [1, T] \\ k \in [1, K]}} \mathbf{p}_{t,k}^{\text{world}}, \quad \mathbf{p}_{\max} = \max_{\substack{t \in [1, T] \\ k \in [1, K]}} \mathbf{p}_{t,k}^{\text{world}}$$
+
+其中 $T$ 是总帧数, $K=8$ 是关键点数, $\mathbf{p}_{t,k}^{\text{world}} \in \mathbb{R}^3$ 是第 $t$ 帧第 $k$ 个关键点的世界坐标.
+
+**计算缩放因子 $R_{\text{pad}}$**:
+
+$$R = \max\big(|{p}_{\min,x}|, {p}_{\max,x},\ |{p}_{\min,y}|, {p}_{\max,y},\ |{p}_{\min,z}|, {p}_{\max,z}\big)$$
+
+$$R_{\text{pad}} = R \times (1 + \alpha), \quad \alpha = 0.15$$
+
+其中 $R$ 是 **各轴绝对值极值中的最大者** — 即以世界原点为中心的最小等向包围球的半径. $\alpha$ 是安全边距.
+
+> **实现细节**: 代码中先取逐轴绝对值极值 `extremes = np.maximum(np.abs(global_min), np.abs(global_max))`, 然后 `R = extremes.max()`, 最后 `R_pad = R * (1 + margin)`. 参见 [`generate_libero_keypoints.py:118-120`](../../util_scripts/generate_libero_keypoints.py#L118-L120).
+
+**Pass 2 — 归一化并写入**:
+
+$$\hat{\mathbf{p}}_{t,k} = \frac{\mathbf{p}_{t,k}^{\text{world}}}{R_{\text{pad}}}$$
+
+代码中对应:
+```python
+kpts[:, :, :3] /= r_pad  # 只对位置 (前3维) 除以 R_pad
+```
+参见 [`generate_libero_keypoints.py:232`](../../util_scripts/generate_libero_keypoints.py#L232). 四元数 (后 4 维) **不做此除法**.
+
+#### 11.2.2 在 LIBERO 合并数据集上的具体数值
+
+| 量 | 值 | 来源 |
+|-----|-----|------|
+| $\mathbf{p}_{\min}$ | $[-0.766, -0.440, 0.908]$ m | Pass 1 全局统计 |
+| $\mathbf{p}_{\max}$ | $[0.276, 0.435, 1.584]$ m | Pass 1 全局统计 |
+| $\text{extremes}$ | $[0.766, 0.440, 1.584]$ | $\max(\|\mathbf{p}_{\min}\|, \|\mathbf{p}_{\max}\|)$ 逐轴取 |
+| $R$ | $1.584$ m | $\max(\text{extremes})$, 由 z 轴最大值决定 |
+| $\alpha$ | $0.15$ | 15% 安全边距 |
+| $R_{\text{pad}}$ | $1.821$ m | $1.584 \times 1.15$ |
+| 归一化后位置范围 | $[-0.42, 0.87]$ | 非对称, 因原点不在 bbox 中心 |
+
+> **为什么是 z 轴决定 $R$?** 因为 Panda 机械臂的底座在 $z \approx 0.91$ m 处, 末端执行器向上可达 $z \approx 1.58$ m, 而 x/y 方向的活动范围更窄 (约 ±0.77 m). z 方向的 $|p_{\max}|$ 最大, 决定了包围球半径.
+
+#### 11.2.3 完整的单帧变换示例
+
+以 episode 0, frame 0 的 gripper0_right_eef 关键点为例 (在 parquet 中已存为归一化后的值):
+
+| 步骤 | 值 | 说明 |
+|------|-----|------|
+| 关节角 | $[0.135, -0.213, 0.027, -1.971, 0.006, 1.815, 0.989]$ rad | 从 `observation.state.joint_position` 读取 |
+| 夹爪位置 | $[0.040, -0.040]$ m | 从 `observation.state[6:8]` 读取 |
+| 构造 qpos | $[0.135, -0.213, ..., 0.989, 0.040, -0.040]$ (9D) | 拼接: 7 joint + 2 gripper |
+| MuJoCo FK | `mj_forward(model, data)` | 计算所有 body 世界位姿 |
+| 世界坐标位置 | 例如 $[0.013, 0.034, 1.082]$ m | `data.xpos[eef_body_id]` |
+| 世界坐标四元数 | 例如 $[0.707, 0, 0, 0.707]$ (wxyz) | `data.xquat[eef_body_id]` |
+| 位置 ÷ $R_{\text{pad}}$ | $[0.007, 0.019, 0.594]$ | **已归一化** |
+| 四元数 wxyz → xyzw | $[0, 0, 0.707, 0.707]$ | 重排序 |
+| 半球约束 | $[0, 0, 0.707, 0.707]$ ($q_w \geq 0$, 无变化) | 若 $q_w < 0$ 则取反 |
+| 写入 parquet | $[0.007, 0.019, 0.594, 0, 0, 0.707, 0.707]$ | 7D, **这是最终存储值** |
+
+### 11.3 归一化方案的由来与演进
+
+`world_origin_isotropic_r_pad` 并非凭空设计, 而是在多个机器人数据集上迭代验证后的选择. 下图展示了代码库中各方案的演进脉络:
+
+```mermaid
+graph TD
+    A["Scheme A-C: GeoPredict auto-offset<br/>(2024-2025)<br/>p̂ = p - offset<br/>目标: 映射到固定体素空间"]
+    D["Scheme D: Per-axis min-max<br/>(中间尝试)<br/>p̂ = (p - p_min)/(p_max - p_min)<br/>目标: 映射到 [0,1]^3"]
+    E["Scheme E: base_link_origin<br/>isotropic R_pad<br/>(R1Pro, 2025)<br/>p̂ = (p - p_base) / R_pad"]
+    F["world_origin_isotropic_r_pad<br/>(LIBERO, 2026)<br/>p̂ = p / R_pad"]
+    
+    A -->|"体素空间溢出<br/>Z轴跨度>1m"| D
+    D -->|"各向异性破坏<br/>距离几何关系"| E
+    E -->|"LIBERO 中世界原点<br/>≈ base_link, 简化"| F
+    
+    style A fill:#E8F5E9
+    style D fill:#FFF3E0
+    style E fill:#E3F2FD
+    style F fill:#FCE4EC
+```
+
+#### 11.3.1 Scheme A-C: GeoPredict auto-offset (平移归一化)
+
+最早的方案来自 GeoPredict 项目, 将关键点工作空间平移到固定的体素空间:
+
+$$\hat{\mathbf{p}} = \mathbf{p} - \mathbf{o}, \quad \mathbf{o} = \frac{\mathbf{p}_{\min} + \mathbf{p}_{\max}}{2} - \mathbf{c}_{\text{voxel}}$$
+
+目标体素空间: $[0, 1.6] \times [0, 1.6] \times [0, 1.0]$, 中心 $\mathbf{c}_{\text{voxel}} = [0.8, 0.8, 0.5]$.
+
+**优点**: 直观, 与 GeoPredict 的 3D 体素网格处理兼容.
+
+**缺点**:
+- **没有缩放**, 只有平移 — 如果机器人工作空间在某个轴上的跨度超过体素空间 (如 R1Pro 的 z 轴跨度 > 1.0 m), 归一化后的值**溢出**体素边界
+- 不同数据集需要不同的 offset, 参数不通用
+- 与四元数的值域 ($[-1, 1]$) 不对齐
+
+> **参考实现**: `GeoPredict/b/script/kpt/coord_transform.py`, 本文档 §2.5 方案 1.
+
+#### 11.3.2 Scheme D: Per-axis min-max (各向异性缩放)
+
+为解决溢出问题, 尝试 per-axis min-max 归一化:
+
+$$\hat{p}_i = \frac{p_i - p_{i,\min}}{p_{i,\max} - p_{i,\min}}, \quad i \in \{x, y, z\}$$
+
+**优点**: 值域严格在 $[0, 1]^3$, 永不溢出.
+
+**致命缺点 — 各向异性破坏距离几何关系**:
+
+考虑一个简化例子: 工作空间 x 方向跨度 0.3 m, z 方向跨度 1.2 m.
+
+| 物理位移 | 归一化后位移 | 扭曲倍数 |
+|----------|-------------|---------|
+| $\Delta x = 0.01$ m (10 mm) | $\Delta \hat{x} = 0.01/0.3 = 0.033$ | 基准 |
+| $\Delta z = 0.01$ m (10 mm) | $\Delta \hat{z} = 0.01/1.2 = 0.008$ | 4× 缩小 |
+
+同样的 10 mm 物理位移, 在归一化空间中 x 方向显得比 z 方向大 4 倍. 这意味着:
+
+- TrackEncoder 的 Conv1d 卷积核在学习空间模式时需要**隐式学习每个轴的缩放系数**, 浪费模型容量
+- 欧氏距离 $\|\hat{\mathbf{p}}_1 - \hat{\mathbf{p}}_2\|$ 不再与物理距离成正比, cross-attention 中基于距离的注意力权重被扭曲
+- MSE 损失对不同轴的惩罚力度不均: 跨度小的轴 (x) 上的误差被放大, 跨度大的轴 (z) 上的误差被缩小
+
+> **说明**: 对于关节角、夹爪宽度等**异质维度** (各维度量纲不同), per-axis 归一化是标准做法 — `observation.state` 和 `action` 就使用 `NormalizeTransformFn` 的 `mean_std` 或 `min_max` 模式进行 per-axis 归一化. 但对于 3D 笛卡尔坐标这种**同质维度**, 各向异性缩放会引入上述失真.
+
+#### 11.3.3 Scheme E / R_pad: 各向同性缩放 (最终方案)
+
+$$\hat{\mathbf{p}} = \frac{\mathbf{p}}{R_{\text{pad}}}, \quad R_{\text{pad}} = R \times (1 + \alpha)$$
+
+**核心性质**:
+
+1. **距离保持** (up to constant):
+$$\|\hat{\mathbf{p}}_1 - \hat{\mathbf{p}}_2\| = \frac{\|\mathbf{p}_1 - \mathbf{p}_2\|}{R_{\text{pad}}}$$
+归一化空间中的欧氏距离与物理空间中的欧氏距离**严格成正比**, 比例系数 $1/R_{\text{pad}}$ 对所有点对相同.
+
+2. **方向保持**:
+$$\frac{\hat{\mathbf{p}}_1 - \hat{\mathbf{p}}_2}{\|\hat{\mathbf{p}}_1 - \hat{\mathbf{p}}_2\|} = \frac{\mathbf{p}_1 - \mathbf{p}_2}{\|\mathbf{p}_1 - \mathbf{p}_2\|}$$
+归一化不改变任何向量的方向.
+
+3. **原点保持**:
+$$\hat{\mathbf{p}}_{\text{origin}} = \frac{\mathbf{0}}{R_{\text{pad}}} = \mathbf{0}$$
+世界原点 (或 base_link) 在归一化空间中仍是原点.
+
+4. **安全边距** ($\alpha = 15\%$): 确保归一化后的值严格在 $(-1, 1)$ 内, 为未见过的轻微越界数据留出余量.
+
+### 11.4 `world_origin` vs `base_link_origin`: 原点的选择
+
+代码库中有两种 R_pad 变体, 区别仅在于坐标系原点:
+
+| 变体 | 原点 | 使用场景 | 存储字段 |
+|------|------|---------|---------|
+| `world_origin_isotropic_r_pad` | MuJoCo 世界坐标系原点 | LIBERO (仿真) | `normalization: "world_origin_isotropic_r_pad"` |
+| `base_link_origin_isotropic` | 机器人基座 link 的坐标系原点 | R1Pro (真实机器人) | `normalization: "base_link_origin_isotropic"` |
+
+**LIBERO 使用 world origin 的原因**:
+
+在 robosuite 中, Panda 机械臂的基座 (`robot0_base`) 安装位置约为 $[-0.56, 0, 0.912]$ m (世界坐标系). 但 `generate_libero_keypoints.py` 直接使用 `data.xpos` (世界坐标), **不减去基座偏移**. 这是可以接受的:
+
+1. 仿真环境中机器人安装位置固定, 世界原点和基座之间有**恒定偏移**, 不影响归一化的等比例缩放性质
+2. 世界坐标系是 MuJoCo FK 的自然输出, 省去了一步坐标变换
+3. 归一化后 link1/link2 (Panda 基座附近) 的位置为固定常量 $[-0.169, 0, 0.375]$ (而非 $[0, 0, 0]$), 但 TrackEncoder 对此不敏感 — 它关注的是关键点之间的**相对运动模式**, 而非绝对位置
+
+**R1Pro 使用 base_link origin 的原因**:
+
+真实机器人的安装位置可能在不同部署中变化. 如果用世界坐标, 换一个安装位置就需要重新计算 $R_{\text{pad}}$ 并重新归一化训练数据. 以 base_link 为原点则只依赖臂的运动学参数, 与安装位置无关, 模型可跨部署迁移.
+
+```mermaid
+graph LR
+    subgraph "LIBERO (仿真)"
+        W1["World origin (0,0,0)"] -->|"固定偏移"| B1["Panda base<br/>(-0.56, 0, 0.91)"]
+        B1 -->|"FK"| K1["Keypoints<br/>in world frame"]
+        K1 -->|"÷ R_pad"| N1["归一化坐标"]
+    end
+    
+    subgraph "R1Pro (真实机器人)"
+        W2["World origin"] -.->|"可变安装"| B2["R1Pro base"]
+        B2 -->|"FK"| K2["Keypoints<br/>in base frame"]
+        K2 -->|"÷ R_pad"| N2["归一化坐标"]
+    end
+    
+    style W1 fill:#E3F2FD
+    style B2 fill:#FFF3E0
+```
+
+### 11.5 四元数归一化: 半球约束的数学原理
+
+#### 11.5.1 Double Cover 问题
+
+单位四元数群 $S^3$ 到旋转群 $\text{SO}(3)$ 的映射是 **2:1 的满射同态**:
+
+$$\phi: S^3 \to \text{SO}(3), \quad \phi(\mathbf{q}) = \phi(-\mathbf{q})$$
+
+即: 对任意单位四元数 $\mathbf{q}$, $\mathbf{q}$ 和 $-\mathbf{q}$ 编码**完全相同的旋转**. 这称为 **double cover** (双覆盖).
+
+**直觉理解**: 四元数旋转使用半角公式:
+
+$$\mathbf{q} = \left(\sin\frac{\theta}{2} \cdot \hat{\mathbf{n}},\ \cos\frac{\theta}{2}\right)$$
+
+其中 $\theta$ 是旋转角, $\hat{\mathbf{n}}$ 是旋转轴. 将 $\theta$ 替换为 $\theta + 2\pi$ (同一旋转):
+
+$$\mathbf{q}' = \left(\sin\frac{\theta + 2\pi}{2} \cdot \hat{\mathbf{n}},\ \cos\frac{\theta + 2\pi}{2}\right) = \left(-\sin\frac{\theta}{2} \cdot \hat{\mathbf{n}},\ -\cos\frac{\theta}{2}\right) = -\mathbf{q}$$
+
+#### 11.5.2 为什么 Double Cover 对训练有害
+
+不做半球归一化时, FK 引擎可能对相邻帧的几乎相同旋转输出 $\mathbf{q}_t$ 和 $-\mathbf{q}_{t+1}$, 导致:
+
+1. **虚假的 MSE 惩罚**: $\|\mathbf{q}_t - (-\mathbf{q}_{t+1})\|^2 = \|\mathbf{q}_t + \mathbf{q}_{t+1}\|^2 \approx 4$, 而实际旋转误差为 0. MSE 损失会错误地产生**巨大的梯度**, 将预测推向零向量 (两个矛盾目标的平均).
+
+2. **时序不连续**: Conv1d 卷积核看到的序列在相邻帧间有 $\Delta \mathbf{q} \approx 2$ 的跳变 (归一化后约为满幅跳变), 而真实运动可能只有 $\Delta \mathbf{q} \approx 0.02$ 的微小变化. 这使得 TrackEncoder 的时序建模失效.
+
+**数值示例** (摘自 [`dta_3dtrj_E2.md`](../../b/d/R1Pro/dta_3dtrj_E2.md) §3.4):
+
+| 帧 | 绕 Z 轴旋转角 | 未归一化四元数 | 半球归一化后 |
+|-----|-------------|--------------|-------------|
+| $t$ | 178° | $[0, 0, 0.999, 0.017]$ | $[0, 0, 0.999, 0.017]$ |
+| $t+1$ | 182° | $[0, 0, 0.999, -0.017]$ | $[0, 0, -0.999, 0.017]$ (取反) |
+
+未归一化时帧间跳变 $\|\Delta\mathbf{q}\| \approx 0.034$ → 归一化后也是 $0.034$ (平滑).
+如果不做半球约束, 从 $[..., 0.017]$ 到 $[..., -0.017]$, $\|\Delta\mathbf{q}\| \approx 0.034$ (恰好还行); 但如果 $q_w$ 从正跨到负而 MuJoCo 内部选了不同的半球, 跳变可达 $\approx 2.0$.
+
+#### 11.5.3 半球约束的实现
+
+$$\hat{\mathbf{q}} = \begin{cases} \mathbf{q} & \text{if } q_w \geq 0 \\ -\mathbf{q} & \text{if } q_w < 0 \end{cases}$$
+
+其中 $\mathbf{q} = [q_x, q_y, q_z, q_w]$ (xyzw 顺序).
+
+```python
+# generate_libero_keypoints.py L79-83
+def _mujoco_quat_to_xyzw(xquat: np.ndarray) -> np.ndarray:
+    raw_q = np.array([xquat[1], xquat[2], xquat[3], xquat[0]], dtype=np.float32)
+    if raw_q[3] < 0:          # raw_q[3] = qw
+        raw_q = -raw_q        # 取反: 同一旋转的另一个四元数表示
+    return raw_q
+```
+
+此函数同时完成两件事:
+1. **重排序**: MuJoCo 输出 wxyz → 存储为 xyzw (与 Pinocchio、ROS、scipy 的惯例一致)
+2. **半球归一化**: 强制 $q_w \geq 0$
+
+**$q_w = 0$ 的退化情况**: 当 $q_w$ 恰好为 0 时 (对应 180° 旋转), $\mathbf{q}$ 和 $-\mathbf{q}$ 都在半球边界上, 约束变得**不唯一**. 在 Panda 机械臂的关节限位内, 这种情况极少出现 (需要某个关节恰好在 ±180° 位置). 更严格的处理方案 (级联检查 $q_z, q_y, q_x$ 符号) 见 [`dta_3dtrj_E2.md`](../../b/d/R1Pro/dta_3dtrj_E2.md) §3.4.5.
+
+#### 11.5.4 为什么四元数不需要 R_pad 缩放
+
+单位四元数的每个分量天然满足 $q_i \in [-1, 1]$ ($\|\mathbf{q}\| = 1$ 保证), 与位置经 $R_{\text{pad}}$ 归一化后的值域 $\approx [-1, 1]^3$ **自然对齐**:
+
+| 分量 | 值域 | 量纲 | 缩放方式 |
+|------|------|------|---------|
+| $p_x, p_y, p_z$ (位置) | $\approx [-1, 1]$ (归一化后) | 无量纲 (物理尺度被 $R_{\text{pad}}$ 吸收) | ÷ $R_{\text{pad}}$ |
+| $q_x, q_y, q_z, q_w$ (姿态) | $[-1, 1]$ (单位四元数保证) | 无量纲 | 无 (天然归一化) |
+
+这意味着 7D 关键点向量 $[p_x, p_y, p_z, q_x, q_y, q_z, q_w]$ 中, 所有分量的数值尺度一致, 不会因为量纲差异导致某一路梯度主导. 这也是选择四元数 (而非旋转矩阵、欧拉角等) 的一个实践优势.
+
+> **参考**: Zhou et al. "On the Continuity of Rotation Representations in Neural Networks" (CVPR 2019) 讨论了四元数表示的不连续性问题 (半球边界处), 并提出 6D 连续表示作为替代. 本方案仍选择四元数, 因为 (a) 半球归一化在关节限位内足够消除不连续性, (b) 4D 比 6D 更紧凑, (c) 与 `dta_3dtrj_E2.md` §3.2 的分析一致 — 在机器人操作的运动范围内, 四元数 + 半球约束的表现优于 6D 表示.
+
+### 11.6 与其他系统归一化方案的横向对比
+
+![Three normalization schemes comparison](asset/three_normalization_schemes.png)
+
+#### 11.6.1 对比总表
+
+| 方案 | 公式 | 值域 | 各向同性? | 原点保持? | 距离保持? | 适用场景 |
+|------|------|------|----------|----------|----------|---------|
+| **Auto-offset** (GeoPredict) | $\hat{\mathbf{p}} = \mathbf{p} - \mathbf{o}$ | 体素空间 | — (无缩放) | ❌ | ✅ (仅平移) | 3D 体素网格处理 |
+| **Per-axis min-max** | $\hat{p}_i = \frac{p_i - p_{i,\min}}{p_{i,\max} - p_{i,\min}}$ | $[0, 1]^3$ | ❌ | ❌ | ❌ | 异质维度 (关节角等) |
+| **Per-axis z-score** (ACT/DP) | $\hat{p}_i = \frac{p_i - \mu_i}{\sigma_i}$ | $\approx [-3, 3]$ | ❌ | ❌ | ❌ | 异质维度 (关节角等) |
+| **q01-q99 min-max** (pi0/OpenPI) | $\hat{p}_i = 2\frac{p_i - q_{01,i}}{q_{99,i} - q_{01,i}} - 1$ | $[-1, 1]$ (robust) | ❌ | ❌ | ❌ | 异质维度, 有离群值 |
+| **R_pad (world origin)** | $\hat{\mathbf{p}} = \mathbf{p} / R_{\text{pad}}$ | $\approx [-1, 1]^3$ | ✅ | ✅ | ✅ | **3D 关键点位置** |
+| **R_pad (base_link origin)** | $\hat{\mathbf{p}} = (\mathbf{p} - \mathbf{p}_{\text{base}}) / R_{\text{pad}}$ | $\approx [-1, 1]^3$ | ✅ | ✅ (base) | ✅ | **3D 关键点 + 跨部署** |
+
+#### 11.6.2 为什么 3D 关键点适合各向同性, 而 state/action 适合各向异性
+
+**关键区分**: 维度之间是**同质**还是**异质**的.
+
+**同质维度** ($p_x, p_y, p_z$): 三个分量共享同一物理量纲 (米), 它们之间的欧氏距离有明确的物理意义. Conv1d 和 cross-attention 隐式使用这个距离来学习空间几何模式. 各向异性缩放会扭曲这个距离, 迫使模型额外学习 per-axis 的缩放修正, **浪费模型容量**. 
+
+**异质维度** (如 `observation.state = [x, y, z, rx, ry, rz, g_L, g_R]`): 位置 (m) 和旋转 (rad) 和夹爪 (m, 但尺度完全不同) 的量纲不同, 数值范围相差数个量级 (position ~0.5 m, rotation ~3 rad, gripper ~0.04 m). 用同一个标量缩放它们没有意义. Per-axis 归一化 (z-score 或 min-max) 将各维度拉到可比较的数值范围, 是正确的选择.
+
+| 字段 | 维度性质 | 归一化方式 | 实现 |
+|------|---------|-----------|------|
+| `observation.keypoint_3d` (位置部分) | 同质 (xyz, 米) | **各向同性 R_pad** | 预计算, 存入 parquet |
+| `observation.keypoint_3d` (四元数部分) | 同质 (单位向量) | **半球约束** (无缩放) | 预计算, 存入 parquet |
+| `observation.state` | 异质 (位置+旋转+夹爪) | **per-axis mean_std** | 训练时 `NormalizeTransformFn` |
+| `action` | 异质 (delta 位移+旋转+夹爪) | **per-axis mean_std** | 训练时 `NormalizeTransformFn` |
+
+### 11.7 安全边距 $\alpha = 15\%$ 的设计考量
+
+$R_{\text{pad}} = R \times 1.15$ 中, 15% 的边距 (margin) 不是任意选择:
+
+**1. 防止训练/评估分布偏移**: 归一化参数 $R$ 来自训练集. 如果评估时遇到训练集未覆盖的关节角组合, FK 可能产生超出训练集包围盒的位置. 15% 的余量为这种偏移留出空间.
+
+**2. 与先前方案保持一致**: R1Pro (`generate_r1pro_keypoints_e1.py`) 和 Franka plug (`generate_franka_keypoints.py`) 都使用 $\alpha = 0.15$. 跨数据集/跨机器人使用相同的 margin 使得预训练→微调时归一化的数值特性保持一致.
+
+**3. 过小/过大的权衡**:
+- $\alpha$ 过小 (如 0.01): 归一化后值接近 ±1.0, 如果有轻微 OOB (out-of-bounds) 就超出 $[-1, 1]$, 可能触发 tanh/sigmoid 饱和或数值问题
+- $\alpha$ 过大 (如 0.50): 归一化后值集中在 $[-0.67, 0.67]$ 附近, "浪费"了 $[-1, 1]$ 值域的动态范围, 等效于降低了精度
+
+**4. 验证**: 代码在 Pass 2 中检查 `np.abs(kpts[:, :, :3]) > 1.01`, 如果有位置超出 1.01 则发出警告. 在 LIBERO 合并数据集上 0 个位置超出, 说明 15% 边距足够.
+
+### 11.8 训练阶段的数据流: 归一化值如何被消费
+
+`observation.keypoint_3d` 的值在数据集生成时已归一化, 训练时**不再经过 `NormalizeTransformFn`**. 完整的数据流:
+
+```mermaid
+flowchart TD
+    subgraph "离线 (数据集生成)"
+        J["joint_position [7] +<br/>gripper [2]"] --> FK["MuJoCo FK"]
+        FK --> WP["世界坐标 [K,7]<br/>(position + quat)"]
+        WP --> N1["位置 ÷ R_pad"]
+        WP --> N2["四元数 半球归一化"]
+        N1 --> PQ["parquet: observation.keypoint_3d [56]"]
+        N2 --> PQ
+    end
+    
+    subgraph "训练时 (在线 transform 链)"
+        PQ --> DI["delta_indices 堆叠<br/>[H+1+C, 56]"]
+        DI --> EX["Extract3DKeypointTransformFn<br/>(拆分为 his_kpts / kpt_t / kpt_future)"]
+        EX --> |"his_kpts [H,J,3]"| TE["TrackEncoder"]
+        EX --> |"kpt_t [J,3]"| KE["Keypoint Expert"]
+        EX --> |"kpt_future [C,J,3]"| LOSS["MSE Loss"]
+    end
+    
+    subgraph "不经过 NormalizeTransformFn"
+        NS["NormalizeTransformFn<br/>selected_keys:<br/>observation.state, action"]
+        NS -.->|"不包含 keypoint_3d"| EX
+    end
+    
+    style PQ fill:#FCE4EC
+    style NS fill:#E0E0E0
+```
+
+关键点:
+- `NormalizeTransformFn.hydrate()` 通过 `schema.get_state_keys() + schema.get_action_keys()` 确定要归一化的字段, 返回 `[observation.state, action]` — **不包含 `observation.keypoint_3d`**.
+- `Extract3DKeypointTransformFn` ([`transform_internvla_a1_5.py:656`](../../src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py#L656)) 直接使用归一化后的值, 按 `keypoint_dim=3` 截取前 3 维 (位置), 四元数在当前 `kpt_4d_mode=pos_rot` 模式下也被传递但在 TrackEncoder 端按 7D 处理.
+- 这意味着 **`stats.json` 中是否有 `observation.keypoint_3d` 的条目不影响训练** — 该字段不被 `NormalizeTransformFn` 使用.
+
+### 11.9 如何从归一化值恢复世界坐标
+
+如果需要将预测或存储的归一化关键点恢复为世界坐标 (例如用于可视化或与仿真环境交互):
+
+$$\mathbf{p}^{\text{world}} = \hat{\mathbf{p}} \times R_{\text{pad}}$$
+
+$R_{\text{pad}}$ 存储在 `meta/keypoints_meta.json` 的 `bbox_radius` 字段中. 对于 LIBERO 合并数据集:
+
+```python
+import json
+import numpy as np
+
+with open("meta/keypoints_meta.json") as f:
+    meta = json.load(f)
+    
+R_pad = meta["bbox_radius"]  # 1.8212722539901733
+
+# 假设 kpt_normalized 是从 parquet 读取的 [56] 向量
+kpt = kpt_normalized.reshape(8, 7)
+position_world = kpt[:, :3] * R_pad       # 恢复位置 (米)
+quaternion_xyzw = kpt[:, 3:7]             # 四元数不需要恢复
+```
+
+> **注意**: `keypoints_meta.json` 中的 `bbox_radius` 字段存储的是 $R_{\text{pad}}$ (已含 margin), **不是**原始半径 $R$. 字段命名有歧义但值是正确的, 参见本文档 §8.3 Q7.
+
+### 11.10 参考文献
+
+| 参考 | 用途 |
+|------|------|
+| [`generate_libero_keypoints.py`](../../util_scripts/generate_libero_keypoints.py) | LIBERO `world_origin_isotropic_r_pad` 的完整实现 |
+| [`generate_r1pro_keypoints_e1.py`](../../util_scripts/generate_r1pro_keypoints_e1.py) | R1Pro `base_link_origin_isotropic` 的完整实现 |
+| [`dta_3dtrj_E2.md`](../../b/d/R1Pro/dta_3dtrj_E2.md) §3.3-§3.4 | 半球约束的详细数学推导与数值示例 |
+| [`dta_3dtrj_E2.md`](../../b/d/R1Pro/dta_3dtrj_E2.md) §5 | 位置归一化 (Scheme E) 的设计原理 |
+| [`cod_analyz_1.md`](../../b/d/R1Pro/cod_analyz_1.md) | Scheme A-E 的完整对比分析 |
+| [`transforms/core.py`](../../src/lerobot/transforms/core.py) L250-316 | `NormalizeTransformFn`: state/action 的 per-axis 归一化 (非 keypoint) |
+| [`transform_internvla_a1_5.py`](../../src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py) L656-730 | `Extract3DKeypointTransformFn`: 消费归一化后的 keypoint_3d |
+| Zhou et al., "On the Continuity of Rotation Representations in Neural Networks", CVPR 2019 | 旋转表示的连续性分析; 四元数半球不连续性的理论背景 |
+| Hamilton, "On Quaternions", 1843 | 四元数代数与 double cover 的数学基础 |
+
+![Normalization overview](asset/normalization_overview.png)

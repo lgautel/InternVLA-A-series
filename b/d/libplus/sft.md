@@ -75,7 +75,7 @@ $$
 \text{steps\_per\_epoch} &= \lceil 273{,}465 / 256 \rceil = 1{,}069 \\
 \text{total\_steps} &= 1{,}069 \times 50 = 53{,}450 \\
 \text{save\_freq} &= 1{,}069 \times 5 = 5{,}345 \quad \text{(每 5 epoch)} \\
-\text{log\_freq} &= 1{,}000 \quad \text{(每 1000 步记录一次)} \\
+\text{log\_freq} &= 100 \quad \text{(每 100 步记录一次)} \\
 \end{aligned}
 $$
 
@@ -312,7 +312,7 @@ image_mapping:
 | `STEPS` | `53450` | 总步数（50 epoch） |
 | `SAVE_FREQ` | `5345` | 保存频率（每 5 epoch） |
 | `NUM_WORKERS` | `12` | DataLoader workers |
-| `LOG_FREQ` | `1000` | 日志频率（每 1000 步） |
+| `LOG_FREQ` | `100` | 日志频率（每 100 步） |
 | `SCHEDULER_WARMUP` | `1000` | Warmup 步数 |
 | `SCHEDULER_DECAY_STEPS` | `30000` | Cosine decay 步数 |
 | `VIDEO_MICRO_BATCH_SIZE` | `2` | WAN video micro-batch（H200 可 2~4） |
@@ -320,7 +320,7 @@ image_mapping:
 | `NCCL_TUNER_PLUGIN` | `/dev/null` | 禁用 NCCL tuner plugin，避免 `ncclInternalError` |
 | `SMOKE` / `WAN_SMOKE` | `0` | Smoke 模式 |
 | `MONITOR_INTERVAL` | `900` | 监控间隔（秒） |
-| `STALE_THRESHOLD` | `900` | 日志 stale 阈值 |
+| `STALE_THRESHOLD` | `1800` | 启动阶段 stall 阈值（训练阶段使用 step-based 检测） |
 | `MAX_RESUME_ATTEMPTS` | `0` | **0 = 不限制** auto-recover 次数；无 ckpt 时从头训，见 §11.1 |
 
 ---
@@ -355,7 +355,7 @@ image_mapping:
 | per-GPU batch | 32 |
 | EBS | 256 |
 | `num_workers` | 12 |
-| `log_freq` | 1000（每 1000 步打印 loss） |
+| `log_freq` | 100（每 100 步打印 loss） |
 | `video_backend` | `torchcodec` |
 | `dist_loading` | false |
 | `use_external_stats` | **true** |
@@ -646,24 +646,94 @@ tail -f /B/Log/4dwvlaOpvlaLibplusKpt0911/*/train.log
 
 | 机制 | 行为 |
 |------|------|
-| **Stale 检测** | 日志 ${STALE_THRESHOLD}s 无更新 → 判定失败 |
-| **Auto-recover** | 失败/stale 后无限重试：**有 checkpoint 则 resume，无 checkpoint 则从头重新训**（`PRETRAINED_PATH`），直至跑完 50 epoch |
+| **Stall 检测** | 基于 **step 进度**（非文件 mtime）：连续 2 次 MONITOR_INTERVAL 检查 step 未变化 → 判定 stall。启动阶段（无 step 输出）退化为进程启动后超过 STALE_THRESHOLD 仍无首条 step → 判定 stall |
+| **Auto-recover** | 失败/stall 后无限重试：**有 checkpoint 则 resume，无 checkpoint 则从头重新训**（`PRETRAINED_PATH`），直至跑完 50 epoch。**Fresh start 使用新的 `OUTPUT_DIR`**（基于 `recover_stamp`），避免 `FileExistsError` |
+| **Checkpoint 搜索** | `_find_latest_checkpoint` 搜索 **整个 `CKPT_ROOT`**（跨 output_dir），即使之前的 fresh start 创建了新目录，也能找到其中的 checkpoint 并 resume |
 | **Auto-restart** | 成功后 `EXPR_NAME` 后缀 A→B→C 递增重启 |
 | **归档** | 每次失败/恢复前后 tar 打包 `/B/Log/${EXPR_NAME}/` 到 `~/b/Ckp/` |
 | **Bigmatrix** | 本方案 **不在 recover 失败时启动**（recover 永不因「无 ckpt」而退出）；仅手动停训后可选用 |
 
-### 11.1 Auto-recover 无限重试实现
+### 11.1 Stall 检测（step-based）
+
+> **2026-09-12 修订**：旧版 `_is_log_stale()` 基于文件 mtime，但 `_monitor_log` 写入同一日志文件导致 mtime 被监控自身污染，当 `STALE_THRESHOLD` ≈ `MONITOR_INTERVAL` 时退化为边界竞争条件。已替换为基于 step 进度的 `_is_training_stalled()`。
+
+```bash
+_LAST_OBSERVED_STEP=""
+_STALL_COUNT=0
+_TRAIN_START_TIME=""
+
+_is_training_stalled() {
+    local cur_step
+    cur_step=$(_parse_step_from_log)
+
+    # 启动阶段（无 step 输出）: 用进程启动时间兜底
+    if [[ -z "${cur_step}" ]]; then
+        if [[ -n "${_TRAIN_START_TIME}" ]]; then
+            local elapsed=$(( $(date +%s) - _TRAIN_START_TIME ))
+            [[ ${elapsed} -gt ${STALE_THRESHOLD} ]]
+        else
+            return 1
+        fi
+        return
+    fi
+
+    # 训练阶段: 检查 step 是否推进
+    if [[ "${cur_step}" == "${_LAST_OBSERVED_STEP}" ]]; then
+        _STALL_COUNT=$((_STALL_COUNT + 1))
+        [[ ${_STALL_COUNT} -ge 2 ]]  # 需连续 2 次未变化
+        return
+    fi
+
+    _LAST_OBSERVED_STEP="${cur_step}"
+    _STALL_COUNT=0
+    return 1
+}
+
+_reset_stall_state() {
+    _LAST_OBSERVED_STEP=""
+    _STALL_COUNT=0
+    _TRAIN_START_TIME=$(date +%s)
+}
+```
+
+| 阶段 | 判定逻辑 | 触发条件（默认参数） |
+|------|----------|---------------------|
+| **启动（无 step）** | 进程启动后 `STALE_THRESHOLD` 秒仍无首条 step | 1800s（30 分钟） |
+| **训练中** | 连续 2 次 `MONITOR_INTERVAL` 检查 step 未变化 | 2 × 900 = 1800s（30 分钟） |
+| **正常** | step 推进 → 重置 `_STALL_COUNT` | — |
+
+LOG_FREQ=100、训练速度 ~7.5s/step 时，每 ~750s 产生新 step log。`MONITOR_INTERVAL=900s` 每次检查几乎必定看到新 step。只有真正卡住（如 NCCL 死锁、GPU hang）才会触发。
+
+### 11.2 Checkpoint 跨目录搜索
+
+`_find_latest_checkpoint` 搜索 **整个 `CKPT_ROOT`**（而非仅当前 `OUTPUT_DIR`），使得 fresh start 创建新目录后，后续 recover 仍能找到之前任何 run 的 checkpoint 并 resume：
+
+```bash
+_LATEST_CKPT=""
+_find_latest_checkpoint() {
+    _LATEST_CKPT=""
+    [[ ! -d "${CKPT_ROOT}" ]] && return
+    _LATEST_CKPT=$(find "${CKPT_ROOT}" -path "*/checkpoints/*/pretrained_model" \
+        -type d 2>/dev/null | sort -V | tail -1)
+    if [[ -n "${_LATEST_CKPT}" ]]; then
+        OUTPUT_DIR=$(dirname "$(dirname "$(dirname "${_LATEST_CKPT}")")")
+    fi
+}
+```
+
+### 11.3 Auto-recover 无限重试实现
 
 lbrp 的 `_auto_resume()` 在找不到 checkpoint 时 `return 1`，主循环会打 FATAL 并启动 bigmatrix。**本方案改为 `_auto_recover()`**：
 
-```bash
-MAX_RESUME_ATTEMPTS="${MAX_RESUME_ATTEMPTS:-0}"   # 0 = 不限制
+> **2026-09-12 修订**：fresh start 分支现使用 `recover_stamp` 生成新的 `OUTPUT_DIR`，避免 `FileExistsError`；stall 检测改为 step-based。
 
+```bash
 _auto_recover() {
     local attempt=0
     while true; do
         attempt=$((attempt + 1))
-        latest_ckpt=$(_find_latest_checkpoint)
+        _find_latest_checkpoint
+        local latest_ckpt="${_LATEST_CKPT}"
 
         _kill_gpu_processes
         pkill -f "bigmatrix_multiply" 2>/dev/null || true
@@ -673,9 +743,10 @@ _auto_recover() {
         recover_stamp=$(date +'%Y_%m_%d_%H_%M_%S')
         LOG_FILE="${LOG_ROOT}/${recover_stamp}/train.log"
         mkdir -p "$(dirname "${LOG_FILE}")"
+        _reset_stall_state
 
         if [[ -n "${latest_ckpt}" ]]; then
-            _monitor_log "RECOVER: Resume from ${latest_ckpt} (attempt ${attempt}, unlimited)"
+            _monitor_log "RECOVER: Resume from ${latest_ckpt} (attempt ${attempt})"
             "${PYTHON}" -m accelerate.commands.launch "${LAUNCH_ARGS[@]}" \
                 src/lerobot/scripts/lerobot_train.py \
                 --config_path="${latest_ckpt}/train_config.json" \
@@ -685,16 +756,28 @@ _auto_recover() {
                 --job_name="${JOB_NAME}" \
                 >> "${LOG_FILE}" 2>&1 &
         else
-            _monitor_log "RECOVER: No checkpoint — fresh start from base (attempt ${attempt}, unlimited)"
-            "${PYTHON}" -m accelerate.commands.launch "${LAUNCH_ARGS[@]}" \
-                "${ARGS[@]}" \
+            # 生成新 OUTPUT_DIR，避免 FileExistsError
+            local recover_job_name="${recover_stamp}-${POLICY}-${JOB_SUFFIX}"
+            local recover_output_dir="${CKPT_ROOT}/${recover_job_name}"
+            OUTPUT_DIR="${recover_output_dir}"
+            _monitor_log "RECOVER: No checkpoint — fresh start (attempt ${attempt}), output_dir=${recover_output_dir}"
+            local fresh_args=()
+            local arg
+            for arg in "${ARGS[@]}"; do
+                if [[ "${arg}" == --output_dir=* ]]; then
+                    fresh_args+=("--output_dir=${recover_output_dir}")
+                elif [[ "${arg}" == --job_name=* ]]; then
+                    fresh_args+=("--job_name=${recover_job_name}")
+                else
+                    fresh_args+=("${arg}")
+                fi
+            done
+            "${PYTHON}" -m accelerate.commands.launch "${fresh_args[@]}" \
                 >> "${LOG_FILE}" 2>&1 &
         fi
         TRAIN_PID=$!
 
-        # 内层监控（与 lbrp _auto_resume 相同）
-        local poll_sec=60
-        local elapsed=0
+        local poll_sec=60 elapsed=0
         while true; do
             sleep ${poll_sec}
             elapsed=$((elapsed + poll_sec))
@@ -702,72 +785,56 @@ _auto_recover() {
             if ! kill -0 "${TRAIN_PID}" 2>/dev/null; then
                 wait "${TRAIN_PID}" 2>/dev/null
                 local recover_exit=$?
-                _monitor_log "RECOVER: Training exited (code=${recover_exit})"
+                _monitor_log "RECOVER: exited code=${recover_exit}"
                 sleep 10
-
                 if [[ "${recover_exit}" -eq 0 ]] && _are_outputs_complete; then
-                    _monitor_log "RECOVER: SUCCESS — Training completed"
+                    _monitor_log "RECOVER: SUCCESS"
                     return 0
                 fi
-                break   # 单次 recover 失败 → 外层 while true 再试（resume 或 fresh）
+                break
             fi
 
             if [[ ${elapsed} -ge ${MONITOR_INTERVAL} ]]; then
                 elapsed=0
-                if _is_log_stale; then
-                    _monitor_log "RECOVER: Log stale >${STALE_THRESHOLD}s — will retry"
+                if _is_training_stalled; then
+                    _monitor_log "RECOVER: training stalled (step=${_LAST_OBSERVED_STEP:-?} unchanged) — retry"
                     break
                 fi
                 local cur_step
-                cur_step=$(grep -oE 'step:[0-9]+' "${LOG_FILE}" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
-                _monitor_log "RECOVER: Healthy step=${cur_step:-?}/${STEPS}"
+                cur_step=$(_parse_step_from_log)
+                _monitor_log "RECOVER: step=${cur_step:-?}/${STEPS}"
             fi
         done
-
-        _monitor_log "RECOVER: Attempt ${attempt} ended without success — retrying"
+        _monitor_log "RECOVER: attempt ${attempt} failed — retrying"
     done
 }
 ```
 
-**主监控循环**（替换 lbrp 中 `_auto_resume` 失败分支）：
-
-```bash
-        else
-            _monitor_log "ERROR: exit=${train_exit}, outputs_complete=$(_are_outputs_complete && echo yes || echo no)"
-            _archive_and_cleanup "_err"
-            if _auto_recover; then
-                _archive_and_cleanup "_resumed"
-                _auto_restart_next
-            fi
-            # 无 else/FATAL：_auto_recover 仅在成功时 return 0，否则一直循环
-        fi
-```
-
-**触发 auto-recover 的条件**（与 lbrp 相同）：
+**触发 auto-recover 的条件**：
 
 1. 训练进程异常退出（exit ≠ 0 或 final checkpoint 未生成）
-2. 训练进程仍存活但日志 stale 超过 ${STALE_THRESHOLD}s
+2. 训练进程仍存活但 step 停滞（连续 2 次 MONITOR_INTERVAL 检查 step 未变化）
+3. 启动阶段超过 STALE_THRESHOLD 仍无首条 step 输出
 
 **恢复策略**（每次进入 `_auto_recover` 外层循环时）：
 
 | 条件 | 动作 |
 |------|------|
-| `checkpoints/*/pretrained_model` 存在 | `--resume=true`，从最新 ckpt 继续 |
-| **无任何 checkpoint** | **从头训练**：`accelerate launch "${ARGS[@]}"`（`pretrained_path=${PRETRAINED_PATH}`，无 `--resume`） |
-| 单次运行再次失败/stale | 不退出，回到外层 `while true` 再判断 resume 或 fresh |
+| `CKPT_ROOT` 下任意 `checkpoints/*/pretrained_model` 存在 | `--resume=true`，从最新 ckpt 继续（`OUTPUT_DIR` 自动定位到含该 ckpt 的目录） |
+| **无任何 checkpoint** | **从头训练**：生成新 `OUTPUT_DIR`（`${CKPT_ROOT}/${recover_stamp}-${POLICY}-${JOB_SUFFIX}`），替换 `ARGS[]` 中的 `--output_dir` 和 `--job_name` |
+| 单次运行再次失败/stall | 不退出，回到外层 `while true` 再判断 resume 或 fresh |
 
 **终止 auto-recover 的唯一条件**：
 
 - 训练正常跑完（exit=0 且 `checkpoints/053450/pretrained_model` 存在）→ `return 0` → 归档 → `_auto_restart_next`
 
-> 与 lbrp 差异：lbrp 在无 ckpt 或 resume 次数用尽时 `return 1` 并 idle bigmatrix；本方案 **永不因此停止**，无 ckpt 即 fresh start。
-
-> 若需临时恢复 lbrp 行为，保留原 `_auto_resume` + `MAX_RESUME_ATTEMPTS=3` + FATAL/bigmatrix 分支。
+> 与 lbrp 差异：lbrp 在无 ckpt 或 resume 次数用尽时 `return 1` 并 idle bigmatrix；本方案 **永不因此停止**，无 ckpt 即 fresh start（新 OUTPUT_DIR）。
 
 监控命令：
 
 ```bash
-grep -oE 'step:[0-9]+' /B/Log/4dwvlaOpvlaLibplusKpt0911/*/train.log | tail -1
+# step 进度（支持 K 后缀）
+grep -oE 'step:[0-9]+(\.[0-9]+)?K?' /B/Log/4dwvlaOpvlaLibplusKpt0911/*/train.log | tail -1
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv
 ```
 
@@ -857,6 +924,25 @@ print('✅ delta timestamps OK, first=', dt['observation.keypoint_3d'][0])
 "
 ```
 
+### 12.1b 监控与 Auto-recover 测试
+
+```bash
+bash tests/test_monitor_stall_detection.sh
+# 预期: 35 passed, 0 failed
+```
+
+覆盖项：
+
+| 测试 | 验证内容 |
+|------|----------|
+| Test 1 | `STALE_THRESHOLD=1800`, `LOG_FREQ=100` 默认值 |
+| Test 2 | `_is_log_stale` 已移除，`_is_training_stalled` 存在 |
+| Test 3 | Stall 检测逻辑：启动阶段 / step 推进 / 首次未变化不触发 / 连续 2 次触发 / K 后缀解析 |
+| Test 4 | Fresh start 生成新 OUTPUT_DIR，ARGS 中 `--output_dir` 和 `--job_name` 被替换，其他参数保留 |
+| Test 5 | `_find_latest_checkpoint` 搜索 CKPT_ROOT 下所有 output_dir，OUTPUT_DIR 跟随 checkpoint 所在目录更新 |
+| Test 6 | LOG_FREQ × speed < MONITOR_INTERVAL 兼容性 |
+| Test 7 | `_reset_stall_state` 清除所有状态 |
+
 ### 12.2 WAN Smoke 验收
 
 | 检查项 | 通过标准 |
@@ -879,9 +965,10 @@ print('✅ delta timestamps OK, first=', dt['observation.keypoint_3d'][0])
 ### 12.4 最终验收清单
 
 - [ ] 单元测试 1~4 通过
+- [ ] 监控 & auto-recover 测试通过（`bash tests/test_monitor_stall_detection.sh`）
 - [ ] WAN_SMOKE=1 通过
 - [ ] SMOKE=1（100 步）通过
-- [ ] 正式训练启动，前 1000 步 loss 正常
+- [ ] 正式训练启动，前 100 步 loss 正常（LOG_FREQ=100）
 - [ ] checkpoint 005345（epoch 5）成功保存
 - [ ] checkpoint 053450（epoch 50, final）成功保存
 - [ ] 现有 Franka/RoboTwin 训练仍可启动（向后兼容）
@@ -948,7 +1035,35 @@ VIDEO_MICRO_BATCH_SIZE=1 bash launch/libplus_sft_launch.sh
 # 或 BATCH_SIZE=16
 ```
 
-### 13.7 数据 symlink 找不到
+### 13.7 监控误杀正常训练 / FileExistsError 死循环
+
+> **2026-09-12 已修复**。本节保留以供参考。
+
+**现象**（旧版）：训练正常但被监控杀死；auto-recover 无限循环 `FileExistsError`。
+
+**根因**：
+
+1. 旧 `_is_log_stale()` 基于文件 mtime，但 `_monitor_log` 写入同一日志文件导致 mtime 被污染，当 `STALE_THRESHOLD` ≈ `MONITOR_INTERVAL` 时成为边界竞争条件
+2. `LOG_FREQ=1000` 导致两次 log 间隔 ~7500s，远大于 `STALE_THRESHOLD=900s`
+3. Fresh start 复用原始 `ARGS[]` 中的 `--output_dir`，目录已存在 + `resume=False` → `FileExistsError`
+
+**修复**（已合入脚本）：
+
+| 修复项 | 变更 |
+|--------|------|
+| `LOG_FREQ` | `1000` → `100`（log 间隔 ~750s < MONITOR_INTERVAL=900s） |
+| `STALE_THRESHOLD` | `900` → `1800`（启动阶段兜底 30 分钟） |
+| Stall 检测 | `_is_log_stale()` → `_is_training_stalled()`（基于 step 进度，非 mtime） |
+| Fresh start | 生成新 `OUTPUT_DIR`（`${CKPT_ROOT}/${recover_stamp}-${POLICY}-${JOB_SUFFIX}`） |
+| Checkpoint 搜索 | `_find_latest_checkpoint` 搜索整个 `CKPT_ROOT`，不限于当前 `OUTPUT_DIR` |
+
+**验证**：
+```bash
+bash tests/test_monitor_stall_detection.sh
+# 预期: 35 passed, 0 failed
+```
+
+### 13.8 数据 symlink 找不到
 
 ```bash
 ls -la ${HF_LEROBOT_HOME}/opvla_libero_merged_kpt
@@ -976,7 +1091,7 @@ ln -sfn /B/Dta/opvla_libero_merged_kpt ${HF_LEROBOT_HOME}/opvla_libero_merged_kp
 2. `cd /B/SRC/itvlaGpLibPlus && pip install -e .`
 3. 运行 §10.1 前置检查
 4. 运行 §12.1 单元测试 1~4
-5. 创建 `launch/libplus_sft_launch.sh`（§10.3）
+5. 运行 §12.1b 监控 & auto-recover 测试：`bash tests/test_monitor_stall_detection.sh`
 6. `WAN_SMOKE=1 bash launch/libplus_sft_launch.sh`
 7. `SMOKE=1 bash launch/libplus_sft_launch.sh`
 8. 正式训练：`nohup bash launch/libplus_sft_launch.sh &`
@@ -1033,7 +1148,7 @@ graph LR
 | `CKPT_ROOT` | `${HOME}/b/Ckp/${EXPR_NAME}` | Smoke 时用 `/tmp/…` | 同 WAN_SMOKE | checkpoint 根目录 | `:55`；Smoke `:135` |
 | `LOG_ROOT` | `/B/Log/${EXPR_NAME}` | 同左 | 同左 | 日志根目录 | `:56` |
 | `MONITOR_INTERVAL` | `900` | 不启用监控 | 不启用 | 秒；生产模式健康检查间隔 | `:58` |
-| `STALE_THRESHOLD` | `900` | 不启用 | 不启用 | 秒；日志无更新则触发 recover | `:59` |
+| `STALE_THRESHOLD` | `1800` | 不启用 | 不启用 | 秒；启动阶段无首条 step 则触发 stall（训练中用 step-based 检测） | `:59` |
 | `BIGMATRIX_SCRIPT` | `b/d/GpRbt/bigmatrix_multiply_optimization.py` | 同左 | 同左 | GPU placeholder 脚本路径 | `:60` |
 | `BIGMATRIX_MAX_RETRIES` | `5` | 同左 | 同左 | 非负整数 | `:61` |
 | `MAX_RESUME_ATTEMPTS` | `0` | 同左 | 同左 | **当前脚本未引用**；`0` 在文档中表示「无限 recover」 | `:62`（仅定义） |
@@ -1047,7 +1162,7 @@ graph LR
 | `STEPS` | `53450` | `2` | `100` | 正整数；见 §14.6 与 epoch 换算 | `:74,85,96` |
 | `NUM_WORKERS` | `12` | `2` | `2` | 非负整数；DataLoader workers | `:75,86,97` |
 | `SAVE_FREQ` | `5345` | `2` | `100` | 正整数 | `:76,87,98` |
-| `LOG_FREQ` | `1000` | `1` | `10` | 正整数 | `:77,88,99` |
+| `LOG_FREQ` | `100` | `1` | `10` | 正整数 | `:77,88,99` |
 | `SCHEDULER_WARMUP` | `1000` | `1` | `50` | 非负整数 | `:78,89,100` |
 | `WANDB_ENABLE` | `true` | `false` | `false` | `true` \| `false` | `:79,90,101` |
 | `NODE_COUNT` | `1` | 同左 | 同左 | ≥1 | `:105` |
