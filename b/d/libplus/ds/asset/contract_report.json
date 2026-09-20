@@ -1,0 +1,206 @@
+{
+  "generated_from": [
+    "chain_orientation_report.json",
+    "kpt_stats.json",
+    "libero_plus_report.json",
+    "orientation_report.json",
+    "raw_stats.json"
+  ],
+  "summary": {
+    "total": 21,
+    "passed": 21,
+    "failed": 0,
+    "blocking_failures": 0
+  },
+  "checks": [
+    {
+      "id": "C1",
+      "channel": "dataset scale",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "RLDS 1693 ep / 273465 frames == merged_kpt 1693 / 273465",
+      "training_side": "/B/Dta/opvla_libero/*/1.0.0/dataset_info.json (shardLengths)",
+      "eval_side": "merged_kpt meta/info.json"
+    },
+    {
+      "id": "C2a",
+      "channel": "image orientation: sim -> RLDS",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "RLDS JPEGs are rot180 of the MuJoCo buffer (row corr -0.8709, col corr -0.9686)",
+      "training_side": "check_orientation.py, projecting state[0:3] through the scene agentview pose",
+      "eval_side": "robosuite IMAGE_CONVENTION='opengl' -> no flip (/B/VENV/libero_plus_client/lib/python3.10/site-packages/robosuite/macros.py:28)"
+    },
+    {
+      "id": "C2b",
+      "channel": "image orientation: RLDS -> merged_kpt",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "merged_kpt mp4 = rlds.rot180 (MSE 8.61 vs runner-up 3929.49); so merged_kpt is back in OpenGL-raw orientation and a pipeline reading the RLDS JPEGs directly MUST rotate 180 deg",
+      "training_side": "chain_orientation_report.json",
+      "eval_side": "train_eval_contract.json image_orientation='raw'"
+    },
+    {
+      "id": "C2c",
+      "channel": "image orientation: eval flag",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "eval must run rotate_images=false so it sends the OpenGL-raw buffer, matching the merged_kpt training frames",
+      "training_side": "merged_kpt mp4 == OpenGL raw (C2a + C2b)",
+      "eval_side": "model2libero_interface.py:156 _maybe_rotate, default false (eval_libero_std.py:43)"
+    },
+    {
+      "id": "C3",
+      "channel": "image size and cameras",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "256x256 JPEG in RLDS; contract resizes to 224x224; camera order [agentview, wrist] on both sides",
+      "training_side": "RLDS features.json / merged_kpt observation.images.{image,image2}",
+      "eval_side": "model2libero_interface.py:183-184 image=[primary, wrist]"
+    },
+    {
+      "id": "C4",
+      "channel": "state layout",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "state = eef_pos(3) + axisangle(3) + gripper_qpos(2); both sides build it from the same robosuite observables",
+      "training_side": "RLDS steps/observation/state, 8D",
+      "eval_side": "model2libero_interface.py:143-154 _extract_state"
+    },
+    {
+      "id": "C5",
+      "channel": "state frame split",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "robosuite reports eef_pos from site gripper0_grip_site but eef_quat from body robot0_right_hand, so state[0:3] and state[3:6] live in frames 90 deg apart; consistent across train and eval because both read the same observables",
+      "training_side": "/B/VENV/libero_plus_client/lib/python3.10/site-packages/robosuite/robots/single_arm.py:304,308",
+      "eval_side": "same code path"
+    },
+    {
+      "id": "C6",
+      "channel": "gripper convention",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "training gripper takes exactly [-1.0, 1.0]; eval must resolve to 'libero_native', never 'openvla'",
+      "training_side": "RLDS action[6]",
+      "eval_side": "model2libero_interface.py:176-180 _update_action_space"
+    },
+    {
+      "id": "C7",
+      "channel": "action range",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "training never exceeds +-0.9375 on the first 6 dims (6.793% of frames sit exactly at that value); OSC_POSE accepts the full [-1, 1], so a policy emitting >0.9375 is legal but out of distribution",
+      "training_side": "raw_stats.json action.abs_max_first6",
+      "eval_side": "/B/VENV/libero_plus_client/lib/python3.10/site-packages/robosuite/controllers/config/osc_pose.json input_max=1"
+    },
+    {
+      "id": "C8",
+      "channel": "control frequency label",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "LIBERO steps the controller at 20 Hz but merged_kpt info.json declares fps=10, with no frame resampled (273465 frames on both sides). This is harmless to the model because every window is addressed by frame index, not seconds; it is only wrong when a human (or a mixed-fps dataset) reads those windows as physical time. H=200 frames is 10 s of robot time, not 20 s",
+      "training_side": "merged_kpt meta/info.json fps; keypoint_3d_delta_indices uses frame offsets",
+      "eval_side": "/B/SRC/LIBERO/libero/libero/envs/env_wrapper.py:27 control_freq=20"
+    },
+    {
+      "id": "C9",
+      "channel": "keypoint world frame",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "both sides place the robot base at the fixed Lift pose (-0.56, 0, 0.912), not at the live arena base. Keypoints are therefore arena-invariant by construction; the data itself contains 5 arena keys spanning 4 distinct base positions",
+      "training_side": "generate_libero_keypoints.py + merged_kpt keypoints_meta.json",
+      "eval_side": "keypoint_utils.py:6 Lift MJCF fixed base"
+    },
+    {
+      "id": "C10",
+      "channel": "keypoint normalisation R_pad",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "eval hardcodes 1.8212722539901733, merged_kpt meta records 1.8212722539901733, and recomputing it from the RLDS bounding box gives 1.8212723272872922 (diff 7.33e-08). No 1.15 factor may be applied again: the margin 0.15 is already inside this number",
+      "training_side": "merged_kpt meta/keypoints_meta.json bbox_radius",
+      "eval_side": "keypoint_utils.py:21 DEFAULT_R_PAD"
+    },
+    {
+      "id": "C11",
+      "channel": "keypoint bodies",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "8 bodies, ['robot0_link1', 'robot0_link2', 'robot0_link3', 'robot0_link4', 'robot0_link5', 'robot0_link6', 'robot0_link7', 'gripper0_right_eef']. The training MJCF names the tip `gripper0_right_eef` while the eval MJCF may name it `gripper0_eef`; EEF_BODY_CANDIDATES covers both",
+      "training_side": "merged_kpt keypoints_meta.json keypoint_bodies",
+      "eval_side": "keypoint_utils.py:27 EEF_BODY_CANDIDATES"
+    },
+    {
+      "id": "C12",
+      "channel": "quaternion convention",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "xyzw order with the qw>=0 hemisphere on both sides. Cost: link7 and eef sit on the branch cut for 186005 and 165783 frames, producing 7658 antipodal jumps that an MSE loss reads as maximal error",
+      "training_side": "generate_libero_keypoints.py quaternion export",
+      "eval_side": "keypoint_utils.py:107-110"
+    },
+    {
+      "id": "C13",
+      "channel": "keypoint reproducibility",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "a GL-free MuJoCo FK over robot.xml reproduces the shipped training keypoints to 2.2e-07 m (float32 rounding), and recovers every arena base to better than 7.0e-05 m",
+      "training_side": "panda_fk.py vs merged_kpt_probe.npz",
+      "eval_side": "keypoint_utils.py StandaloneFK"
+    },
+    {
+      "id": "C14",
+      "channel": "history window",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "H=200: 55.4% of history slots are padding and only 21.85% of episodes ever fill the window (libero_spatial peaks at 192 and can never fill it). Eval must push the keypoint BEFORE env.step so the current pose does not leak into history",
+      "training_side": "keypoint_history_max_len=200 in launch/internvla_a15_finetune_libero_geop.sh:232",
+      "eval_side": "keypoint_utils.py:137 KeypointHistory(max_len=200); model2libero_interface.py:129-140 push_keypoint"
+    },
+    {
+      "id": "C15",
+      "channel": "warmup steps",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "eval runs 10 dummy steps ([0]*6+[-1]) before the first inference, calling push_keypoint each time, so the policy starts with 10 real history frames; training samples at t=0 start with 0. This is a deliberate mismatch that only helps, but it must stay documented",
+      "training_side": "Extract3DKeypointTransformFn front-packs valid frames, his_len counts them",
+      "eval_side": "eval_libero_std.py:335 num_steps_wait; :38 LIBERO_DUMMY_ACTION"
+    },
+    {
+      "id": "C16",
+      "channel": "LIBERO-plus reach",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "8480/10030 (84.5%) of LIBERO-plus variants perturb only appearance, which the keypoint channel cannot see -- that is the branch's robustness asset. The remaining 'Robot Initial States' variants override init_qpos only; base_xpos_offset is never touched",
+      "training_side": "training first-frame EEF spread p95 = 2.14 cm",
+      "eval_side": "LIBERO-plus/libero/libero/envs/robots/mounted_panda.py (500 subclasses)"
+    },
+    {
+      "id": "C17",
+      "channel": "LIBERO-plus init_qpos OOD",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "init_qpos perturbation tiers move the EEF by 0.1 rad -> 3.4 cm, 0.2 rad -> 7.2 cm, 0.3 rad -> 10.8 cm, 0.4 rad -> 14.1 cm, 0.5 rad -> 17.5 cm (worst 33.8 cm), against a training first-frame spread of only 2.14 cm at p95. Even the mildest tier starts the episode outside the training start distribution",
+      "training_side": "analyze_libero_plus.py",
+      "eval_side": "LIBERO-plus/libero/libero/envs/robots/new_init.py"
+    },
+    {
+      "id": "C18",
+      "channel": "data integrity",
+      "severity": "blocking",
+      "status": "PASS",
+      "detail": "no NaNs, is_first/is_last/is_terminal and reward/discount all well formed, and OpenVLA's no-op filter finds nothing left to remove",
+      "training_side": "raw_stats.json integrity + noop_audit",
+      "eval_side": "n/a"
+    },
+    {
+      "id": "C19",
+      "channel": "episode-level splitting",
+      "severity": "informational",
+      "status": "PASS",
+      "detail": "40 tasks, no validation split anywhere in the archive. Frame shares are uneven (libero_10 is 37.1% of frames from only 22.39% of episodes), so frame-uniform sampling silently reweights the suites; any split must be made per episode",
+      "training_side": "raw_stats.json subsets",
+      "eval_side": "n/a"
+    }
+  ]
+}

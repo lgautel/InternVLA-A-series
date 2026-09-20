@@ -31,7 +31,7 @@ InternVLA-A1.5 的核心收益并不是简单地把一个视频模型接到 VLA 
 
 以下问题是代码级风险；在修复前，任何超参结论都只能作为暂定结论。
 
-1. **FAST 的输入归一化需要单独核对。** 当前 `InternVLA-A1.5` transform 链默认用 `mean_std` 归一化，而官方 FAST 以每个动作维度的 `q01/q99` 映射到 `[-1,1]`。如果同一个归一化后的 action 同时喂给 flow matching 和 FAST，两个分支可能处于不一致的数值空间。(???所以后训练时是不是要禁止FAST)
+1. **FAST 的输入归一化需要单独核对。** 当前 `InternVLA-A1.5` transform 链默认用 `mean_std` 归一化，而官方 FAST 以每个动作维度的 `q01/q99` 映射到 `[-1,1]`。如果同一个归一化后的 action 同时喂给 flow matching 和 FAST，两个分支可能处于不一致的数值空间。
 2. **`tokenize_state=true` 时 foresight token 切片存在确定性偏移风险。** 当前 `embed_suffix()` 在 `tokenize_state=true` 时没有 state token，但 `get_learnable_token_output()` 固定从索引 1 开始，可能丢掉第一个 foresight token，并把一个 action token 当作 foresight token。
 3. **FAST/state 文本与数值 state/action 的 reorder 时序要统一。** FAST 和 state prompt 在 `ReorderStateActionTransform` 之前生成，而数值张量在之后重排；对非恒等 schema，这可能造成文本动作维度和 flow matching 动作维度不一致。
 4. **机器人数据与 M1 VQA 的比例需要以实际 batch 计数验收。** 论文是 robot:M1 = 0.15:0.85；仓库教程中示例的 `vqa_dataset.weight=0.15` 经 `factory.py` 实现后却是 robot:VQA = 0.85:0.15。
@@ -174,11 +174,9 @@ Output: <SubTask, Action>
 
 论文 Stage 1 只训练 VLM 的统一 next-token objective：
 
-\[
-\mathcal{L}_{\mathrm{stage1}}
+$$\mathcal{L}_{\mathrm{stage1}}
 =
--\sum_{i\in\mathcal{Y}}\log p_\theta(y_i\mid y_{<i},o_t,l,q_t)
-\]
+-\sum_{i\in\mathcal{Y}}\log p_\theta(y_i\mid y_{<i},o_t,l,q_t)$$
 
 其中：
 
@@ -194,22 +192,18 @@ VQA 样本只保留答案 target，不产生 action loss；机器人样本同时
 
 论文 Stage 2 继续保留 Stage 1 的 VLM loss，同时加入视频和连续动作：
 
-\[
-\mathcal{L}_{\mathrm{stage2}}
+$$\mathcal{L}_{\mathrm{stage2}}
 =
 \mathcal{L}_{\mathrm{stage1}}
 +\alpha \mathcal{L}_{\mathrm{video}}
-+\beta \mathcal{L}_{\mathrm{action}}
-\]
++\beta \mathcal{L}_{\mathrm{action}}$$
 
 其中 \(\alpha=1\)，\(\beta=10\)。
 
 本地模型的 action flow matching 为：
 
-\[
-x_t=t\epsilon+(1-t)a,\qquad
-u_t=\epsilon-a
-\]
+$$x_t=t\epsilon+(1-t)a,\qquad
+u_t=\epsilon-a$$
 
 其中：
 
@@ -221,11 +215,9 @@ u_t=\epsilon-a
 
 模型输出 \(v_\theta(x_t,t,c)\)，动作损失为逐元素 MSE：
 
-\[
-\mathcal{L}_{\mathrm{action}}
+$$\mathcal{L}_{\mathrm{action}}
 =
-\operatorname{MSE}\left(v_\theta(x_t,t,c),u_t\right)
-\]
+\operatorname{MSE}\left(v_\theta(x_t,t,c),u_t\right)$$
 
 代码证据：`modeling_internvla_a1_5.py:1180-1199, 1780-1798, 1937-1944`。
 
@@ -277,16 +269,14 @@ foresight token 和上游 expert 产生梯度。训练脚本中的 `freeze_wan_d
 
 启用 `enable_keypoint_predictor` 后，关键点分支产生：
 
-\[
-\mathcal{L}_{\mathrm{kpt}}
+$$\mathcal{L}_{\mathrm{kpt}}
 =
 \lambda_{\mathrm{kpt}}
 \left(
 \mathcal{L}_{\mathrm{kpt,current}}
 +\gamma
 \mathcal{L}_{\mathrm{kpt,future}}
-\right)
-\]
+\right)$$
 
 其中：
 
@@ -605,13 +595,11 @@ NormalizeTransformFn() -> FASTInternVLAA15ActionTokenizerTransformFn()
 
 官方 FAST 的标准流程是：
 
-\[
-\tilde a_d
+$$\tilde a_d
 =
 2\frac{\operatorname{clip}(a_d,q_{01,d},q_{99,d})-q_{01,d}}
 {q_{99,d}-q_{01,d}}
--1
-\]
+-1$$
 
 其中 \(d\) 是动作维度，\(q_{01,d}\) 和 \(q_{99,d}\) 是训练集分位数。之后才进行 DCT、scale-and-round 和 BPE。
 
@@ -791,13 +779,11 @@ inference_backend=optimized
 
 建议增加：
 
-\[
-\mathcal{L}_{\mathrm{action}}
+$$\mathcal{L}_{\mathrm{action}}
 =
 \frac{\sum_{h,d}m_d\,
 \operatorname{MSE}(v_{h,d},u_{h,d})}
-{\sum_{h,d}m_d}
-\]
+{\sum_{h,d}m_d}$$
 
 其中 \(m_d=1\) 表示该 embodiment 的有效动作维度。
 
@@ -1382,3 +1368,907 @@ inference_steps in {4, 8, 10, 16}
 ## 14. 一句话总结
 
 InternVLA-A1.5 最值得复制的不是某个孤立的 learning rate，而是“原生 VLM 语义保持 + FAST 离散动作 + 连续 flow matching + frozen-WAN latent foresight + 分阶段训练 + 按 source/task 重采样”的组合；对当前仓库，最快的效果提升路径是先修正 FAST/foresight/reorder/padding 等数据契约，再用 M1 混合、阶段式训练、vision 分模块 LR、同步图像增强和执行 horizon 做有控制的消融。
+
+---
+
+## 15. 已确定的实施范围：standard backend 下启用双 state 表示
+
+本节根据当前部署约束，重写前文第 15–23 节。采用以下明确前提：
+
+1. `tokenize_state=true` 时，VLM prompt 保留离散 state 文本 token；
+2. Action Expert suffix 同时加入连续 state embedding token；
+3. 允许 state 在 VLM prefix、Keypoint suffix 和 Action suffix 中重复注入；
+4. 推理只使用 standard backend；
+5. 不修改 `modeling_internvla_a1_5_optimized.py`；
+6. 当前机器人是 Franka Panda，按当前 Panda schema 判断 reorder；
+7. 重新训练模型，不展开旧 checkpoint 迁移、旧训练状态恢复或 optimizer resume；
+8. 本节是代码级实施方案，不直接修改训练代码。
+
+目标结构：
+
+```text
+tokenize_state=true:
+    VLM prefix    = image + instruction + discrete state text
+    KPT suffix    = continuous kpt state + history + query       # 启用 GeoPredict 时
+    ACT suffix    = continuous action state + foresight + action/time
+```
+
+修改后，`tokenize_state` 只控制 VLM prompt 是否添加离散 state 文本；
+Action Expert 始终使用连续 state token。
+
+### 15.1 必须保持的不变量
+
+1. standard Action Expert suffix 始终为：
+
+   ```text
+   [continuous state(1)] [learnable foresight(N)] [action/time(C)]
+   ```
+
+2. 默认 `N=50`、`C=50`，action suffix 长度为 101；
+3. `tokenize_state=true/false` 的 action suffix 长度都为 101；
+4. suffix 第 0 个 token 始终是连续 state token；
+5. suffix 第 `1` 到 `N` 个 token 始终是 foresight tokens；
+6. suffix 最后 `C` 个 token 始终是 action/time tokens；
+7. `get_learnable_token_output()` 从索引 1 开始；
+8. action 从 suffix 尾部读取；
+9. GeoPredict 的 keypoint suffix 保留独立的 `kpt_state_proj` token；
+10. standard training、standard action inference、standard video inference 使用同一 suffix 布局；
+11. 当前 Panda 不需要为本次变更修改 state/action reorder；
+12. 新实验使用新输出目录并重新训练。
+
+### 15.2 为什么不能只改一处
+
+连续 state token 的存在性由至少三处 standard 代码共同决定：
+
+- `state_proj` 是否创建；
+- `embed_suffix()` 是否生成并拼接 state token；
+- suffix 的后续 slice 是否按 `[state, learnable, action]` 解释。
+
+如果只改 `embed_suffix()`，会出现 `self.state_proj` 不存在；如果只改 `state_proj` 初始化，
+state token仍不会进入 suffix；如果只改 foresight slice，Action Expert 仍然没有连续 state。
+
+本次不把 optimized backend 纳入实现范围，因此不要求修改其静态 suffix 长度、mask、CUDA
+Graph 或 `embed_suffix_fast()`。
+
+## 16. 当前代码的真实行为
+
+### 16.1 VLM prefix 的离散 state token
+
+数据侧 `_encode_state()` 会把 state pad 到 `max_state_dim`，除以 3，离散到 256 个 bin，
+再构造 `State: ...` 文本：
+
+```95:103:src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py
+    def _encode_state(self, data: DataDict) -> str:
+        if not self.tokenize_state or OBS_STATE not in data:
+            return ""
+        state = deepcopy(data[OBS_STATE])
+        state = pad_vector(state, self.max_state_dim)
+        state_np = state.cpu().numpy() / 3
+        discretized = np.digitize(state_np, bins=np.linspace(-1, 1, 257)[:-1]) - 1
+        return "State: " + " ".join(map(str, discretized))
+```
+
+`__call__()` 再把该字符串追加到 VLM user prompt：
+
+```110:123:src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py
+        user_text = "Task: " + str(data.get(self.task_key, ""))
+        user_text = user_text + "; " + f"Control Mode: <{self.action_mode}>"
+        if self.tokenize_state and state_str:
+            user_text = user_text + "; " + state_str
+```
+
+因此，目标方案下 VLM prefix 仍然包含离散 state 文本 token；这部分不删除。
+
+### 16.2 Action Expert 当前缺少连续 state token
+
+当前模型初始化只在 `tokenize_state=false` 时创建 `state_proj`：
+
+```994:1001:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        self.action_in_proj = nn.Linear(config.max_action_dim, action_expert_hidden_size)
+        self.action_out_proj = nn.Linear(action_expert_hidden_size, config.max_action_dim)
+
+        if not self.config.tokenize_state:
+            self.state_proj = nn.Linear(config.max_state_dim, action_expert_hidden_size)
+```
+
+当前 `embed_suffix()` 也只在同一条件成立时加入 state token：
+
+```1512:1528:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def embed_suffix(self, state, noisy_actions, timestep):
+        """Build suffix: [state(1)] [learnable(N)] [action_time(chunk_size)]."""
+        embs = []
+        pad_masks = []
+        att_masks = []
+
+        # State token
+        if not self.config.tokenize_state:
+            if self.state_proj.weight.dtype == torch.float32:
+                state = state.to(torch.float32)
+            state_emb = self._apply_checkpoint(lambda s: self.state_proj(s), state)
+            embs.append(state_emb[:, None, :])
+            bsize = state_emb.shape[0]
+            device = state_emb.device
+            pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
+            att_masks += [1]
+```
+
+所以当前实际布局是：
+
+```text
+tokenize_state=false: [continuous state] [foresight] [action/time]
+tokenize_state=true : [foresight] [action/time]
+```
+
+### 16.3 当前 foresight slice 为什么错位
+
+当前代码固定跳过第 0 个 token：
+
+```1633:1637:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def get_learnable_token_output(self, suffix_out):
+        start = 1  # skip state token
+        end = 1 + self.config.num_learnable_tokens
+        return suffix_out[:, start:end]
+```
+
+在旧 `tokenize_state=true` 布局下，第 0 个 token其实是 foresight token，所以该代码会：
+
+```text
+丢弃 foresight_0
+把 action_0 误当作 foresight token
+```
+
+加入连续 state token后，布局恢复为：
+
+```text
+suffix_out[:, 0]       = continuous state
+suffix_out[:, 1:1+N]   = foresight tokens
+suffix_out[:, 1+N:]    = action/time tokens
+```
+
+因此本方案中 `start=1` 变成正确逻辑，不应改成 `start=0`。
+
+### 16.4 action 和 video 的实际调用
+
+Action loss 从 suffix 尾部取 action：
+
+```1937:1948:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        # Action loss
+        if self.config.video_loss_only:
+            loss_action = torch.zeros_like(u_t)
+        else:
+            action_out = suffix_out[:, -self.config.chunk_size:]
+            action_out = action_out.to(dtype=torch.float32)
+            v_t = self._apply_checkpoint(lambda x: self.action_out_proj(x), action_out)
+            loss_action = F.mse_loss(u_t, v_t, reduction="none")
+```
+
+Video loss 使用 learnable/foresight token：
+
+```1946:1955:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        if self.config.action_loss_only or self.config.video_loss_weight == 0.0:
+            video_loss = torch.tensor(0.0, device=actions.device)
+        else:
+            has_video = video_mask.any() if video_mask is not None else (video_frames is not None)
+            if has_video:
+                learnable_out = self.get_learnable_token_output(suffix_out).to(dtype=torch.float32)
+```
+
+所以修改后：
+
+- action loss 的尾部切片不变；
+- video loss 取得正确的 foresight tokens；
+- `predict_action_chunk_with_video()` 取得正确的 WAN conditioning；
+- 普通 action inference 额外获得连续 state 条件。
+
+## 17. Franka Panda 的数据契约判断
+
+### 17.1 Panda schema 是 identity mapping
+
+当前 Panda schema：
+
+```1:14:src/lerobot/dataset_schemas/configs/panda.yaml
+# Panda robot (no gripper)
+robot_type: panda
+action_mask_spec: [7]
+feature_mapping:
+  observation.state:
+    - observation.state
+  action:
+    - action
+image_mapping:
+  observation.images.image: observation.images.image0
+  observation.images.image2: observation.images.image1
+description: "Panda robot (no gripper, all delta action)"
+```
+
+当前有效结论：
+
+- `observation.state -> observation.state`，没有 state reorder；
+- `action -> action`，没有 action reorder；
+- 没有 `state_reorder` 字段；
+- 没有 `action_reorder` 字段；
+- image mapping 只是相机字段重命名，不属于 state/action reorder。
+
+`DatasetSchema` 也将两个 reorder 字段默认设为 `None`：
+
+```50:58:src/lerobot/dataset_schemas/schema.py
+    robot_type: str
+    feature_mapping: dict[str, list[str]] = field(default_factory=dict)
+    image_mapping: dict[str, str] = field(default_factory=dict)
+    action_mask_spec: Optional[list[int]] = None
+    action_reorder: Optional[list[list[int]]] = None
+    state_reorder: Optional[list[list[int]]] = None
+```
+
+### 17.2 本次可以不修改 reorder
+
+如果训练数据 metadata 的真实值是 `robot_type=panda`，则本次不需要考虑前文所述
+非 identity reorder 风险，也不需要移动 `ReorderStateActionTransform`。
+
+运行时应只做一次 preflight：
+
+```text
+robot_type == "panda"
+action_reorder is None
+state_reorder is None
+```
+
+需要区分以下情况：
+
+- 硬件是 Franka Panda，但 metadata 写成 `franka` 或 `Franka`；
+- 使用了带 gripper 的 Franka schema；
+- `action_mode` 是 `abs` 还是 `delta`。
+
+这些会影响 feature mapping、动作维度和动作表示，但不属于本次 state token 变更的
+reorder 阻断项。当前方案不修改 reorder；未来切换 embodiment 时另行分析。
+
+### 17.3 Panda 的 transform 顺序保留原样
+
+当前默认顺序在 `configuration_internvla_a1_5.py:44-68`：
+
+```text
+DeltaAction
+→ image transforms
+→ Normalize
+→ ComposeFields
+→ FAST tokenizer
+→ LoadActionText
+→ ChatProcessor
+→ PadStateAndAction
+→ ReorderStateAction(no-op for Panda)
+→ Unify
+```
+
+本次不移动这些 transform。对 Panda 来说，reorder 是 no-op；这样可以避免把 state token
+修复与 transform 顺序变更混成一个无法归因的实验。
+
+## 18. standard backend 的具体修改方案
+
+### 18.1 必改一：无条件创建 `state_proj`
+
+文件：
+
+```text
+src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+```
+
+位置：`InternVLAA15.__init__()`，当前约 994-1001 行。
+
+删除：
+
+```python
+if not self.config.tokenize_state:
+    self.state_proj = nn.Linear(config.max_state_dim, action_expert_hidden_size)
+```
+
+改为：
+
+```python
+self.state_proj = nn.Linear(
+    config.max_state_dim,
+    action_expert_hidden_size,
+)
+```
+
+要求：
+
+1. 保留参数名 `state_proj`；
+2. 输入维度使用 `config.max_state_dim`；
+3. 输出维度使用 action expert hidden size；
+4. 不复用 `kpt_state_proj`；
+5. 不改变 action expert 其它 projection；
+6. 使用默认 Linear 初始化；
+7. 重新训练时让该层从随机初始化学习。
+
+默认 `max_state_dim=32`、`action_expert_hidden_size=1024`，参数量约 33.8K。
+
+### 18.2 必改二：`embed_suffix()` 始终加入连续 state token
+
+文件：
+
+```text
+src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+```
+
+位置：`InternVLAA15.embed_suffix()`，当前约 1512-1570 行。
+
+把当前条件 block：
+
+```python
+if not self.config.tokenize_state:
+    if self.state_proj.weight.dtype == torch.float32:
+        state = state.to(torch.float32)
+    state_emb = self._apply_checkpoint(lambda s: self.state_proj(s), state)
+    embs.append(state_emb[:, None, :])
+    bsize = state_emb.shape[0]
+    device = state_emb.device
+    pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
+    att_masks += [1]
+```
+
+改为无条件 block：
+
+```python
+# Continuous state token is always present in Action Expert suffix.
+if self.state_proj.weight.dtype == torch.float32:
+    state = state.to(torch.float32)
+state_emb = self._apply_checkpoint(lambda s: self.state_proj(s), state)
+embs.append(state_emb[:, None, :])
+bsize = state_emb.shape[0]
+device = state_emb.device
+pad_masks.append(torch.ones(bsize, 1, dtype=torch.bool, device=device))
+att_masks += [1]
+```
+
+必须保留：
+
+- fp32 cast；
+- `_apply_checkpoint()`；
+- `state_emb[:, None, :]`；
+- state 的 `pad_masks`；
+- state group 的 `att_masks += [1]`；
+- 后续 learnable/action block 的顺序。
+
+同步把 docstring 改为：
+
+```python
+"""Build suffix: [continuous_state(1)] [learnable(N)] [action_time(C)]."""
+```
+
+### 18.3 必改三：统一验证 foresight slice
+
+本方案下保留：
+
+```python
+start = 1
+end = 1 + self.config.num_learnable_tokens
+return suffix_out[:, start:end]
+```
+
+推荐加入长度检查：
+
+```python
+expected = 1 + self.config.num_learnable_tokens + self.config.chunk_size
+if suffix_out.shape[1] != expected:
+    raise RuntimeError(
+        f"Unexpected action suffix length: got {suffix_out.shape[1]}, expected {expected}"
+    )
+```
+
+如果不希望在推理热路径中抛异常，可将该检查放在测试和 debug helper 中，但不能重新
+使用 `tokenize_state` 决定 slice 起点。
+
+也可以使用尾部相对切片：
+
+```python
+n = self.config.num_learnable_tokens
+c = self.config.chunk_size
+return suffix_out[:, -(c + n):-c]
+```
+
+两者在目标布局下等价。整个代码库只保留一种实现，避免 training/video/inference
+使用不同 slice。
+
+### 18.4 不改 standard 的动态 mask、position 和 MoT boundary
+
+standard backend 中以下路径使用实际 `suffix_len`，不需要重写算法：
+
+- `denoise_step()`：`modeling_internvla_a1_5.py:1429-1450`；
+- `denoise_step_full()`：`:1654-1672`；
+- `forward()` 的 suffix 拼接：`:1836-1873`；
+- `make_att_2d_masks()`：`:105-116`。
+
+新增 state token 后，suffix group 应为：
+
+```text
+state:     [1]
+learnable: [1, 0, ..., 0]
+action:    [1, 0, ..., 0]
+```
+
+这些代码会根据实际 embedding 长度生成 mask 和 position，因此只需测试：
+
+```text
+suffix_len == 1 + num_learnable_tokens + chunk_size == 101
+```
+
+### 18.5 不改 action/video loss 公式
+
+本次不修改：
+
+- flow matching 的 noise、time、velocity target；
+- `loss_action`；
+- `loss_video`；
+- `loss_vlm`、`loss_fast`、`loss_subtask`；
+- keypoint loss；
+- action/video/keypoint loss weights。
+
+唯一输入结构变化是 Action Expert 多一个连续 state token，且 foresight slice 恢复正确。
+loss 的改善幅度必须通过重新训练和闭环评估确认，不能从 shape 修复直接推导。
+
+### 18.6 GeoPredict 只需做长度和结果联动验证
+
+`embed_kpt_suffix()` 已经始终加入 `kpt_state_proj(state)`，本次不修改 keypoint suffix。
+默认 J=8 时：
+
+```text
+KPT suffix = 1 + J + J = 17
+ACT suffix = 1 + N + C = 101
+```
+
+完整 expert suffix 为 118 个 token。三路径 action offset 使用动态 `kpt_len` 和 `suffix_len`，
+因此不改 `compute_layer_complete_3path()`、`_forward_3path()` 或 position boundary。
+
+必须验证：
+
+- action state token 没有被放入 keypoint segment；
+- action suffix 的第 0 个 token 是 `state_proj(state)`；
+- keypoint suffix 的第 0 个 token 是 `kpt_state_proj(state)`；
+- keypoint query 仍取最后 J 个 keypoint token；
+- action 仍取 action suffix 最后 C 个 token。
+
+## 19. 配置、训练和 standard 推理入口
+
+### 19.1 配置不需要新增开关
+
+当前 policy config 已默认 `tokenize_state=true`：
+
+```420:426:src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py
+    # VQA configurations
+    enable_vqa_loss: bool = True
+    lambda_vqa: float = 1.0
+    tokenize_state: bool = True
+```
+
+训练脚本也通常显式传入：
+
+```text
+--policy.tokenize_state=true
+--dataset.tokenize_state=true
+```
+
+本次不增加 `use_continuous_state_token`，因为用户已经确定 Action Expert 始终加入该 token。
+只需更新配置注释，明确 `tokenize_state` 不再控制连续 state token 的存在性。
+
+### 19.2 训练脚本只需做参数和日志确认
+
+以 `launch/libplus_sft_launch.sh` 为例，现有参数已经满足：
+
+```190:193:launch/libplus_sft_launch.sh
+    --policy.enable_vqa_loss=true
+    --policy.tokenize_state=true
+
+    --policy.action_loss_only=false
+```
+
+```220:233:launch/libplus_sft_launch.sh
+    --dataset.type="${POLICY}"
+    --dataset.repo_id="${DATA_REPO_ID}"
+    --dataset.enable_keypoint_predictor=true
+    --dataset.num_keypoint_joints=8
+    --dataset.kpt_4d_mode=pos_rot
+    --dataset.keypoint_history_max_len=200
+    --dataset.action_mode=abs
+    --dataset.use_external_stats=true
+    --dataset.external_stats_path="${EXTERNAL_STATS_PATH}"
+    --dataset.dist_loading=false
+    --dataset.tokenize_state=true
+    --dataset.use_fast_action_tokens=true
+```
+
+不需要把 `tokenize_state` 改成 false，也不需要新增训练字段。训练启动日志应打印：
+
+```text
+policy.tokenize_state=true
+dataset.tokenize_state=true
+continuous_state_token=true
+state_proj=present
+action_suffix_len=101
+```
+
+正式训练必须使用新输出目录；本方案不设计旧训练状态恢复。
+
+### 19.3 推理统一使用 standard backend
+
+用户已确定推理使用 standard backend，因此推理配置必须保证：
+
+```text
+config.inference_backend = "standard"
+```
+
+普通 action inference：
+
+```text
+policy.predict_action_chunk(batch)
+→ model.sample_actions()
+→ denoise_step()
+→ embed_suffix()
+→ state_proj(state) + learnable + action/time
+```
+
+视频可视化 inference：
+
+```text
+policy.predict_action_chunk_with_video(batch)
+→ denoise_step_full()
+→ get_learnable_token_output()
+→ generate_video()
+```
+
+后者是本次修复 foresight slice 后的关键验证路径。
+
+当前 open-loop 脚本在无关键点且不做视频可视化时会选择 optimized backend：
+
+```365:375:tests/openloop_internvla_a1_5.py
+    if args.visualize_future:
+        config.inference_backend = "standard"
+        config.action_loss_only = False
+    elif config.enable_keypoint_predictor:
+        config.inference_backend = "standard"
+        config.action_loss_only = True
+    else:
+        config.inference_backend = "optimized"
+        config.action_loss_only = True
+```
+
+如果该 open-loop 入口用于本次新模型，应将最后一个分支改为 standard，或在调用前显式
+覆盖 `config.inference_backend="standard"`。这不是修改 optimized backend，而是保证实际
+使用的是用户指定的 standard 推理路径。
+
+评估 server 也必须加载 standard `InternVLAA15Policy`。`no_state_prompt=true` 只允许移除
+VLM 离散 state 文本，不能删除 `observation.state`，否则 Action Expert 的连续 state token
+没有输入。
+
+## 20. 影响和风险
+
+### 20.1 预期收益
+
+1. 修复 `tokenize_state=true` 时的 foresight token 错位；
+2. Action Expert 直接获得连续 state 数值；
+3. 对 Panda 关节状态和夹爪/末端控制的精细动作更友好；
+4. action 和 keypoint expert 都使用连续 state 条件；
+5. video foresight loss 对正确的 learnable tokens 进行监督；
+6. standard training 和 standard inference 的 suffix 结构统一。
+
+这些是结构性预期，不等于已证明的 SR 提升；必须通过重新训练和闭环评估确认。
+
+### 20.2 计算开销
+
+新增：
+
+- 一个 `state_proj` Linear；
+- 每个 Action Expert forward 多 1 个 suffix token；
+- 每层 attention/linear path 多处理 1 个 token；
+- 一个小型 state projection 的训练梯度。
+
+默认从 100 增加到 101 个 action suffix token，参数增量约 33.8K，预计显存和吞吐影响
+很小，但必须在 WAN smoke 和正式 batch 上实测。
+
+### 20.3 双 state 表示风险
+
+`tokenize_state=true` 时同时存在：
+
+```text
+VLM prefix:    discrete state text
+KPT suffix:    continuous kpt state（启用 GeoPredict）
+ACT suffix:    continuous action state
+```
+
+允许重复注入，但仍需观察：
+
+- VLM 离散 state 与 continuous state 是否数值一致；
+- state token 是否过度主导 action expert；
+- 小规模 Panda 数据上是否过拟合 state；
+- 新增 state projection 是否让训练初期 loss 震荡；
+- video foresight 是否真正改善 OOD/动态任务，而非只改善 loss。
+
+由于用户要求重新训练，本方案不设计旧权重兼容；所有性能结论都以新训练实验为准。
+
+### 20.4 Panda 特有的检查点
+
+虽然不考虑 reorder 风险，但仍必须固定：
+
+- 实际 metadata 的 `robot_type`；
+- Panda state/action 的维度；
+- `action_mode=abs` 或 `delta`；
+- `meta/stats.json` 是否对应同一个 action mode；
+- `image0/image1` 的相机含义；
+- 训练和评估是否使用同一 state normalization。
+
+这些是 Panda 数据契约，不等同于 reorder 问题。
+
+## 21. 测试实施方案
+
+### 21.1 suffix 结构单元测试
+
+扩展或新增：
+
+```text
+tests/test_step2_attention_mask.py
+tests/test_internvla_a1_5_state_suffix.py
+```
+
+使用 `N=3`、`C=2` 的小尺寸 mock，分别覆盖：
+
+- `tokenize_state=false`；
+- `tokenize_state=true`；
+- `enable_keypoint_predictor=false`；
+- `enable_keypoint_predictor=true`。
+
+断言：
+
+```text
+state_proj 存在
+suffix shape = [B, 1+N+C, hidden]
+pad_masks 长度 = 1+N+C
+att_masks = [1] + [1,0,0] + [1,0]
+learnable output = suffix[:, 1:1+N]
+action output = suffix[:, -C:]
+```
+
+用递增 hidden state 验证 slice：
+
+```python
+suffix_out = torch.arange(
+    1 * (1 + num_lt + chunk_size) * hidden,
+    dtype=torch.float32,
+).reshape(1, 1 + num_lt + chunk_size, hidden)
+expected = suffix_out[:, 1 : 1 + num_lt]
+actual = model.get_learnable_token_output(suffix_out)
+assert torch.equal(actual, expected)
+```
+
+### 21.2 修正现有 attention mask 测试假设
+
+当前 `tests/test_step2_attention_mask.py` 假设：
+
+```text
+tokenize_state=true  -> action suffix A=100
+tokenize_state=false -> action suffix A=101
+```
+
+新方案必须改为：
+
+```text
+tokenize_state=true  -> action suffix A=101
+tokenize_state=false -> action suffix A=101
+```
+
+GeoPredict J=8 时，完整 expert suffix 测试应使用：
+
+```text
+K=17
+A=101
+```
+
+不是旧的 `A=100`。
+
+### 21.3 state sensitivity 测试
+
+构造两份输入，仅改变 state：
+
+```text
+state_a = zeros
+state_b = non-zero
+images/instruction/noise/time 相同
+```
+
+断言：
+
+- `state_proj(state_a) != state_proj(state_b)`；
+- suffix 第 0 个 token 改变；
+- learnable 参数本身不因 state 直接改变；
+- action/time 原始输入不因 state 直接改变；
+- 完整 forward 输出可以改变；
+- learnable/action 输出 shape 不改变。
+
+覆盖：
+
+- float32；
+- bfloat16；
+- gradient checkpointing；
+- `train_expert_only`；
+- `freeze_vision_encoder`；
+- `freeze_keypoint_modules`。
+
+### 21.4 standard forward 和 GeoPredict 三路径测试
+
+扩展：
+
+```text
+tests/test_step4_compute_layer.py
+tests/test_step5_forward_loss.py
+tests/test_step6_inference.py
+tests/test_step7_transform_freeze.py
+```
+
+至少验证：
+
+1. 无 GeoPredict 时 `action suffix=101`；
+2. 有 GeoPredict 时 `kpt suffix=17`、`action suffix=101`；
+3. action suffix 第 0 个 token 来自 `state_proj`；
+4. keypoint suffix 第 0 个 token 来自 `kpt_state_proj`；
+5. action 输出仍是最后 50 个 token；
+6. learnable 输出是 state 后的 50 个 token；
+7. action position IDs 位于 `[prefix, keypoint]` 之后；
+8. VLM 不 attend 到后续 expert；
+9. keypoint 不 attend 到 action；
+10. action 可以 attend 到 prefix 和 keypoint；
+11. WAN loss 使用 50 个正确 foresight hidden states。
+
+### 21.5 Panda schema preflight 测试
+
+不做非 Panda reorder 矩阵，只增加当前数据的快速断言：
+
+```python
+schema = get_schema(robot_type)
+assert robot_type == "panda"
+assert schema.action_reorder is None
+assert schema.state_reorder is None
+```
+
+同时记录：
+
+```text
+schema.action_mode
+schema.get_state_keys()
+schema.get_action_keys()
+state.shape
+action.shape
+```
+
+如果实际 metadata 不是 `panda`，停止本方案的 Panda 简化路径并重新审查 schema。
+
+### 21.6 standard inference smoke
+
+按顺序：
+
+1. standard、1 GPU、2 step、WAN off；
+2. standard、1 GPU、2 step、WAN smoke；
+3. standard、1 GPU、100 step；
+4. standard、GeoPredict、100 step；
+5. 完成新结构的前向与 loss smoke；
+6. `predict_action_chunk()`；
+7. `predict_action_chunk_with_video()`；
+8. 标准 LIBERO smoke；
+9. LIBERO-plus 正确朝向小规模评估。
+
+本次不执行 optimized inference 验收，也不把 optimized backend 作为回退路径。
+
+### 21.7 训练日志字段
+
+每 100 step 记录：
+
+```text
+policy.tokenize_state
+dataset.tokenize_state
+robot_type
+continuous_state_token
+state_proj.weight norm
+state_proj gradient norm
+state/action/learnable suffix shapes
+loss_action
+loss_video
+loss_vqa
+loss_fast
+loss_kpt_cur
+loss_kpt_fut
+peak HBM
+step time
+```
+
+## 22. 实施顺序和验收标准
+
+### 22.1 实施顺序
+
+```text
+1. 确认实际 robot_type=panda、state_reorder/action_reorder=None
+2. 备份当前文档和实验输出信息
+3. standard __init__ 无条件创建 state_proj
+4. standard embed_suffix 无条件加入 state token
+5. 保持 get_learnable_token_output start=1
+6. 更新 standard suffix/mask/position 单元测试
+7. 更新 GeoPredict 三路径长度测试
+8. 确保推理入口使用 standard backend
+9. 跑 1 GPU action smoke
+10. 跑 WAN smoke
+11. 跑 GeoPredict standard smoke
+12. 新建训练输出目录并重新训练
+13. 先做 open-loop
+14. 再做标准 LIBERO
+15. 最后做正确朝向的 LIBERO-plus/OOD 评估
+```
+
+### 22.2 必须通过的正确性标准
+
+- `state_proj` 在 `tokenize_state=true` 时存在；
+- `embed_suffix()` 输出长度为 101；
+- `tokenize_state=false/true` 的 action suffix 长度均为 101；
+- `get_learnable_token_output()` 不丢第一个 foresight token；
+- action 输出仍然是最后 50 个 token；
+- standard action/video inference shape 正确；
+- GeoPredict 的 KPT=17、ACT=101；
+- WAN smoke 无 shape error、NaN 或 Inf；
+- Panda schema preflight 通过；
+- 不使用 optimized backend；
+- 训练和评估均保留 `observation.state`。
+
+### 22.3 性能验收
+
+固定：
+
+- 新的训练初始化；
+- 数据 split；
+- seed；
+- batch；
+- action mode；
+- normalization stats；
+- 图像预处理；
+- 评估 server。
+
+对比：
+
+- action loss；
+- video loss；
+- VQA/FAST loss；
+- standard LIBERO SR；
+- LIBERO-plus/OOD SR；
+- task-level worst-10；
+- action smoothness；
+- standard inference latency；
+- peak HBM；
+- samples/s。
+
+不能只因为训练 loss 下降就判定双 state 有效；至少需要闭环 SR、OOD 指标或稳定性
+出现可重复改善。
+
+## 23. 方案总结
+
+在当前约束下，真正需要修改的核心代码只有 standard backend 的两处：
+
+1. `modeling_internvla_a1_5.py:997` 附近：无条件创建 `state_proj`；
+2. `modeling_internvla_a1_5.py:1512` 附近：`embed_suffix()` 无条件加入连续 state token。
+
+`get_learnable_token_output()` 的 `start=1` 应保留；standard 的 action/video slice、动态
+mask、position IDs 和 GeoPredict boundary 不需要重写，只需更新和补充测试。
+
+按当前用户约束，本次不修改：
+
+- `modeling_internvla_a1_5_optimized.py`；
+- 旧 checkpoint/旧训练状态/optimizer resume 逻辑；
+- Panda 的 reorder transform；
+- loss 公式和 loss 权重。
+
+Panda schema 已确认 state/action 是 identity mapping，因而可以忽略非 identity reorder 风险。
+但必须在训练前确认实际 metadata 确实使用 `robot_type=panda`，并保持 state normalization、
+action mode、相机字段和训练/评估输入一致。
+
+最终目标是：
+
+```text
+VLM prefix  : discrete state text
+ACT suffix  : continuous state + foresight + action/time
+KPT suffix  : continuous kpt state + history + query
+推理        : standard backend
+训练        : 新结构重新训练
+```

@@ -1,0 +1,23 @@
+{
+  "rlds_episode": {
+    "subset": "libero_spatial",
+    "task": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+    "num_steps": 110,
+    "instruction": "pick up the black bowl next to the cookie box and place it on the plate"
+  },
+  "merged_video": "videos/observation.images.image/chunk-000/file-000.mp4",
+  "mse_rlds_vs_merged": {
+    "as_stored": 6198.36,
+    "rot180": 8.61,
+    "vflip": 4762.52,
+    "hflip": 3929.49
+  },
+  "verdict": {
+    "transform_from_rlds_to_merged": "rot180",
+    "mse": 8.61,
+    "runner_up": "hflip",
+    "runner_up_mse": 3929.49,
+    "margin_ratio": 456.39
+  },
+  "interpretation": "combined with check_orientation.py (RLDS = rot180 of the MuJoCo buffer), a rot180 here means the merged training frames are back in robosuite raw orientation, which is what evaluation/LIBERO2/train_eval_contract.json assumes"
+}

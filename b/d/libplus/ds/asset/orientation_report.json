@@ -1,0 +1,150 @@
+{
+  "method": "project observation.state[0:3] through the scene's fixed agentview camera and compare against the motion-energy centroid of the stored JPEGs",
+  "image_hw": 256,
+  "fovy_deg": 45.0,
+  "stride_frames": 4,
+  "episodes_scored": 48,
+  "cameras": {
+    "table": {
+      "pos": [
+        0.6586131746834771,
+        0.0,
+        1.6103500240372424
+      ],
+      "quat": [
+        0.6380177736282349,
+        0.3048497438430786,
+        0.30484986305236816,
+        0.6380177736282349
+      ],
+      "source": "problems/libero_tabletop_manipulation.py:187"
+    },
+    "kitchen_table": {
+      "pos": [
+        0.6586131746834771,
+        0.0,
+        1.6103500240372424
+      ],
+      "quat": [
+        0.6380177736282349,
+        0.3048497438430786,
+        0.30484986305236816,
+        0.6380177736282349
+      ],
+      "source": "problems/libero_kitchen_tabletop_manipulation.py:190"
+    },
+    "study_table": {
+      "pos": [
+        0.4586131746834771,
+        0.0,
+        1.6103500240372424
+      ],
+      "quat": [
+        0.6380177736282349,
+        0.3048497438430786,
+        0.30484986305236816,
+        0.6380177736282349
+      ],
+      "source": "problems/libero_study_tabletop_manipulation.py:193"
+    },
+    "living_room_table": {
+      "pos": [
+        0.6065773716836134,
+        0.0,
+        0.96
+      ],
+      "quat": [
+        0.6182166934013367,
+        0.3432307541370392,
+        0.3432314395904541,
+        0.6182177066802979
+      ],
+      "source": "problems/libero_living_room_tabletop_manipulation.py:190"
+    },
+    "floor": {
+      "pos": [
+        0.8965773716836134,
+        5.216182733499864e-07,
+        0.65
+      ],
+      "quat": [
+        0.6182166934013367,
+        0.3432307541370392,
+        0.3432314395904541,
+        0.6182177066802979
+      ],
+      "source": "problems/libero_floor_manipulation.py:184"
+    }
+  },
+  "variant_scores_px": {
+    "identity (MuJoCo raw, row 0 = bottom)": {
+      "median_pixel_error": 122.99,
+      "mean_pixel_error": 126.01
+    },
+    "vflip (upright, row 0 = top)": {
+      "median_pixel_error": 89.23,
+      "mean_pixel_error": 93.37
+    },
+    "hflip": {
+      "median_pixel_error": 107.35,
+      "mean_pixel_error": 103.91
+    },
+    "rot180": {
+      "median_pixel_error": 55.42,
+      "mean_pixel_error": 56.79
+    }
+  },
+  "trajectory_correlation": {
+    "note": "correlation of the identity projection against the observed centroid; a negative sign means that axis is stored flipped",
+    "row_median": -0.8709,
+    "col_median": -0.9686,
+    "row_negative_fraction": 1.0,
+    "col_negative_fraction": 0.9583,
+    "verdict": "rot180"
+  },
+  "verdict": {
+    "stored_as": "rot180",
+    "agrees_with_correlation_test": true,
+    "median_pixel_error": 55.42,
+    "runner_up": "vflip (upright, row 0 = top)",
+    "runner_up_error": 89.23,
+    "margin_ratio": 1.61,
+    "residual_error_note": "the residual tens of pixels is expected: a point projection is compared against the centroid of an extended moving arm, which biases the estimate but not the sign of the correlation"
+  },
+  "per_arena_median_px": {
+    "table": {
+      "identity (MuJoCo raw, row 0 = bottom)": 116.46,
+      "vflip (upright, row 0 = top)": 82.87,
+      "hflip": 107.58,
+      "rot180": 53.25
+    },
+    "floor": {
+      "identity (MuJoCo raw, row 0 = bottom)": 163.88,
+      "vflip (upright, row 0 = top)": 122.11,
+      "hflip": 124.69,
+      "rot180": 56.36
+    },
+    "living_room_table": {
+      "identity (MuJoCo raw, row 0 = bottom)": 113.87,
+      "vflip (upright, row 0 = top)": 99.69,
+      "hflip": 93.19,
+      "rot180": 56.76
+    },
+    "kitchen_table": {
+      "identity (MuJoCo raw, row 0 = bottom)": 96.32,
+      "vflip (upright, row 0 = top)": 88.51,
+      "hflip": 70.74,
+      "rot180": 70.89
+    }
+  },
+  "overlay": {
+    "variant_order": [
+      "identity (MuJoCo raw, row 0 = bottom)",
+      "vflip (upright, row 0 = top)",
+      "hflip",
+      "rot180"
+    ],
+    "task": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+    "arena": "table"
+  }
+}

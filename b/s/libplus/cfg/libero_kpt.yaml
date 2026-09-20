@@ -1,0 +1,76 @@
+# LIBERO 3D/4D Keypoint Generation Configuration (v2)
+# Used by generate_libero_kpt_v2.py and verification scripts.
+
+# -- Data paths --
+source_dataset: /B/Dta/libero_merged_lerobot_v3
+dest_merged: /B/Dta/libero_merged_kpt_v2
+hf_lerobot_home: /B/VENV/hf_home/lerobot
+
+# -- MJCF --
+mjcf_path: evaluation/panda_robosuite_lift.xml
+
+# -- FK parameters --
+num_keypoints: 8
+keypoint_dim: 7  # 3 pos + 4 quat (xyzw)
+bbox_margin: 0.15  # 15% safety margin, INCLUDED in R_pad, do NOT apply again
+
+# -- Keypoint bodies (must match eval-time StandaloneFK) --
+keypoint_arm_bodies:
+  - robot0_link1
+  - robot0_link2
+  - robot0_link3
+  - robot0_link4
+  - robot0_link5
+  - robot0_link6
+  - robot0_link7
+eef_body_candidates:
+  - gripper0_eef
+  - gripper0_right_eef
+
+# -- qpos construction --
+robot_nqpos: 9
+joint_column: observation.state.joint_position  # 7D arm joints
+state_column: observation.state                 # state[6:8] = gripper fingers
+
+# -- Quaternion convention --
+rotation_representation: quaternion_xyzw_hemisphere
+# MuJoCo native: wxyz -> stored: xyzw, flipped so qw >= 0
+
+# -- Normalization --
+normalization: world_origin_isotropic_r_pad
+# pos_normalized = pos_world / R_pad
+# R_pad = max(|pos_min|, |pos_max|) * (1 + bbox_margin)
+
+# -- Expected values (for cross-validation) --
+eval_default_r_pad: 1.8212722539901733
+expected_total_frames: 273465  # approximate
+
+# -- Training parameters (must match) --
+training:
+  kpt_4d_mode: pos_rot
+  keypoint_history_max_len: 200
+  num_keypoint_joints: 8
+  kpt_loss_weight: 1.0
+  kpt_future_loss_weight: 2.0
+  kpt_rot_loss_weight: 1.0
+
+# -- Split episode counts --
+splits:
+  libero_spatial: 432
+  libero_object: 454
+  libero_goal: 428
+  libero_10: 379
+
+# -- Python environments --
+vla_python: /B/VENV/itnvla15rbt20/bin/python
+libero_python: /B/VENV/libero_plus_client/bin/python
+hf_home: /B/VENV/hf_home
+
+# -- Arena base positions (for reference / EEF cross-validation) --
+arena_bases:
+  table: [-0.66, 0.0, 0.912]
+  kitchen_table: [-0.66, 0.0, 0.912]
+  study_table: [-0.75, 0.0, 0.912]
+  living_room_table: [-0.51, 0.0, 0.42]
+  floor: [-0.60, 0.0, 0.0]
+lift_base: [-0.56, 0.0, 0.912]

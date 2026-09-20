@@ -1,0 +1,27 @@
+{
+  "nq": 16,
+  "nv": 15,
+  "nbody": 24,
+  "eef_body": "gripper0_eef",
+  "keypoint_bodies": [
+    "robot0_link1",
+    "robot0_link2",
+    "robot0_link3",
+    "robot0_link4",
+    "robot0_link5",
+    "robot0_link6",
+    "robot0_link7",
+    "gripper0_eef"
+  ],
+  "body_ids": {
+    "robot0_link1": 4,
+    "robot0_link2": 5,
+    "robot0_link3": 6,
+    "robot0_link4": 7,
+    "robot0_link5": 8,
+    "robot0_link6": 9,
+    "robot0_link7": 10,
+    "gripper0_eef": 13
+  },
+  "md5": "f66126f1814ce08ca39ef96f08646244"
+}

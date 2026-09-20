@@ -1,0 +1,28 @@
+# Franka plug-into-socket v2 keypoint generation config
+# Dataset: plug_into_socket_franka3_15hz_lerobot (15Hz, 100 episodes)
+
+source: /B/Dta/plug_into_socket_franka3_15hz_lerobot
+dest: /B/Dta/plug_into_socket_franka3_15hz_lerobot_4D
+urdf: b/d/Frk2/fr3v2_1_franka_hand.urdf
+link_prefix: fr3v2_1
+bbox_margin: 0.15
+num_keypoints: 8
+keypoint_dim: 7
+
+# New dataset column mapping
+state_column: observation.state
+arm_slice: "0:7"
+ee_pos_slice: "8:11"
+ee_quat_slice: "11:15"  # [qw, qx, qy, qz] in dataset
+
+# FK cross-validation thresholds
+fk_cross_val_pos_thresh_mm: 2.0
+fk_cross_val_rot_thresh_deg: 1.0
+
+# Train-inference contract parameters
+dataset_fps: 15
+keypoint_history_max_len: 200
+
+# Gripper convention (documentation only, not used by keypoint generation)
+# New dataset: 0.01 = closed, 1.0 = open (OPPOSITE to old dataset)
+gripper_convention: width_normalized  # w/w_max, 0=closed 1=open

@@ -1,0 +1,205 @@
+{
+  "catalogue": {
+    "per_suite": {
+      "libero_spatial": {
+        "total_tasks": 2402,
+        "by_category": {
+          "Background Textures": 258,
+          "Robot Initial States": 350,
+          "Camera Viewpoints": 376,
+          "Language Instructions": 390,
+          "Sensor Noise": 351,
+          "Objects Layout": 385,
+          "Light Conditions": 292
+        }
+      },
+      "libero_object": {
+        "total_tasks": 2518,
+        "by_category": {
+          "Background Textures": 248,
+          "Robot Initial States": 398,
+          "Camera Viewpoints": 396,
+          "Language Instructions": 354,
+          "Sensor Noise": 422,
+          "Objects Layout": 403,
+          "Light Conditions": 297
+        }
+      },
+      "libero_goal": {
+        "total_tasks": 2591,
+        "by_category": {
+          "Background Textures": 281,
+          "Robot Initial States": 409,
+          "Camera Viewpoints": 408,
+          "Language Instructions": 410,
+          "Sensor Noise": 379,
+          "Objects Layout": 425,
+          "Light Conditions": 279
+        }
+      },
+      "libero_10": {
+        "total_tasks": 2519,
+        "by_category": {
+          "Background Textures": 289,
+          "Robot Initial States": 393,
+          "Camera Viewpoints": 419,
+          "Language Instructions": 383,
+          "Sensor Noise": 449,
+          "Objects Layout": 312,
+          "Light Conditions": 274
+        }
+      }
+    },
+    "overall_by_category": {
+      "Sensor Noise": 1601,
+      "Camera Viewpoints": 1599,
+      "Robot Initial States": 1550,
+      "Language Instructions": 1537,
+      "Objects Layout": 1525,
+      "Light Conditions": 1142,
+      "Background Textures": 1076
+    },
+    "total_tasks": 10030,
+    "difficulty_levels": {
+      "1": 1644,
+      "2": 2202,
+      "3": 2094,
+      "4": 1886,
+      "5": 2083,
+      "None": 121
+    }
+  },
+  "channel_reach": {
+    "Background Textures": {
+      "images": true,
+      "keypoints": false,
+      "mechanism": "scene XML texture swap"
+    },
+    "Camera Viewpoints": {
+      "images": true,
+      "keypoints": false,
+      "mechanism": "mujoco_arena.set_camera on agentview only (problems/*.py `_setup_camera`)"
+    },
+    "Language Instructions": {
+      "images": false,
+      "keypoints": false,
+      "mechanism": "BDDL language_instruction"
+    },
+    "Light Conditions": {
+      "images": true,
+      "keypoints": false,
+      "mechanism": "scene XML light edits"
+    },
+    "Objects Layout": {
+      "images": true,
+      "keypoints": false,
+      "mechanism": "object placement / init_states; robot joints untouched"
+    },
+    "Robot Initial States": {
+      "images": true,
+      "keypoints": true,
+      "mechanism": "MountedPanda{i}/OnTheGroundPanda{i} override init_qpos"
+    },
+    "Sensor Noise": {
+      "images": true,
+      "keypoints": false,
+      "mechanism": "agentview_image post-processing in envs/env_wrapper.py"
+    }
+  },
+  "robot_variants": {
+    "mounted_panda_variants": 500,
+    "on_the_ground_panda_variants": 500,
+    "properties_overridden_besides_init_qpos": {
+      "MountedPanda*": [],
+      "OnTheGroundPanda*": []
+    },
+    "base_xpos_offset_unchanged": true,
+    "nominal_init_qpos": [
+      0.0,
+      -0.161037,
+      0.0,
+      -2.444597,
+      0.0,
+      2.226752,
+      0.785398
+    ],
+    "generator": "LIBERO-plus/libero/libero/envs/robots/new_init.py (unit direction * tier)"
+  },
+  "init_qpos_perturbation": {
+    "tiers": {
+      "0.1": {
+        "variants": 100,
+        "dq_norm_mean_rad": 0.1,
+        "eef_disp_mean_m": 0.034,
+        "eef_disp_max_m": 0.0589,
+        "max_body_disp_max_m": 0.0589,
+        "eef_disp_mean_normalised": 0.01865
+      },
+      "0.2": {
+        "variants": 100,
+        "dq_norm_mean_rad": 0.2,
+        "eef_disp_mean_m": 0.0719,
+        "eef_disp_max_m": 0.1414,
+        "max_body_disp_max_m": 0.1414,
+        "eef_disp_mean_normalised": 0.03947
+      },
+      "0.3": {
+        "variants": 100,
+        "dq_norm_mean_rad": 0.3,
+        "eef_disp_mean_m": 0.1075,
+        "eef_disp_max_m": 0.1839,
+        "max_body_disp_max_m": 0.1839,
+        "eef_disp_mean_normalised": 0.059
+      },
+      "0.4": {
+        "variants": 100,
+        "dq_norm_mean_rad": 0.4,
+        "eef_disp_mean_m": 0.1414,
+        "eef_disp_max_m": 0.2657,
+        "max_body_disp_max_m": 0.2657,
+        "eef_disp_mean_normalised": 0.07762
+      },
+      "0.5": {
+        "variants": 100,
+        "dq_norm_mean_rad": 0.5,
+        "eef_disp_mean_m": 0.1748,
+        "eef_disp_max_m": 0.3382,
+        "max_body_disp_max_m": 0.3382,
+        "eef_disp_mean_normalised": 0.09595
+      }
+    },
+    "all_variants": {
+      "eef_disp_mean_m": 0.1059,
+      "eef_disp_p95_m": 0.2346,
+      "eef_disp_max_m": 0.3382
+    }
+  },
+  "training_first_frame_distribution": {
+    "episodes": 1693,
+    "eef_centre_m": [
+      -0.10400000214576721,
+      -0.0005000000237487257,
+      1.173699975013733
+    ],
+    "eef_radius_mean_m": 0.0114,
+    "eef_radius_p95_m": 0.0214,
+    "eef_radius_max_m": 0.0395,
+    "note": "spread of the very first keypoint frame across the 1693 training episodes; the history window at eval starts from the perturbed pose instead"
+  },
+  "verdict": {
+    "keypoint_visible_categories": [
+      "Robot Initial States"
+    ],
+    "keypoint_invisible_categories": [
+      "Background Textures",
+      "Camera Viewpoints",
+      "Language Instructions",
+      "Light Conditions",
+      "Objects Layout",
+      "Sensor Noise"
+    ],
+    "fraction_of_catalogue_invisible_to_keypoints": 0.8455,
+    "tasks_invisible_to_keypoints": 8480,
+    "tasks_total": 10030
+  }
+}

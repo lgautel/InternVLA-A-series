@@ -1,0 +1,789 @@
+{
+  "dataset": "/B/Dta/opvla_libero",
+  "totals": {
+    "episodes": 1693,
+    "frames": 273465,
+    "official_demos": 2000,
+    "retention_pct": 84.65,
+    "num_tasks": 40
+  },
+  "subsets": {
+    "libero_spatial": {
+      "episodes": 432,
+      "frames": 52970,
+      "num_tasks": 10,
+      "retention_pct": 86.4,
+      "episode_share_pct": 25.52,
+      "frame_share_pct": 19.37,
+      "len_min": 75,
+      "len_max": 193,
+      "len_mean": 122.6,
+      "len_p50": 123,
+      "len_p95": 158
+    },
+    "libero_object": {
+      "episodes": 454,
+      "frames": 66984,
+      "num_tasks": 10,
+      "retention_pct": 90.8,
+      "episode_share_pct": 26.82,
+      "frame_share_pct": 24.49,
+      "len_min": 114,
+      "len_max": 254,
+      "len_mean": 147.5,
+      "len_p50": 146,
+      "len_p95": 177
+    },
+    "libero_goal": {
+      "episodes": 428,
+      "frames": 52042,
+      "num_tasks": 10,
+      "retention_pct": 85.6,
+      "episode_share_pct": 25.28,
+      "frame_share_pct": 19.03,
+      "len_min": 75,
+      "len_max": 270,
+      "len_mean": 121.6,
+      "len_p50": 105,
+      "len_p95": 198
+    },
+    "libero_10": {
+      "episodes": 379,
+      "frames": 101469,
+      "num_tasks": 10,
+      "retention_pct": 75.8,
+      "episode_share_pct": 22.39,
+      "frame_share_pct": 37.1,
+      "len_min": 150,
+      "len_max": 505,
+      "len_mean": 267.7,
+      "len_p50": 259,
+      "len_p95": 392
+    }
+  },
+  "tasks": [
+    {
+      "subset": "libero_10",
+      "task": "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it",
+      "instruction": "turn on the stove and put the moka pot on it",
+      "num_instructions": 1,
+      "episodes": 41,
+      "frames": 10866,
+      "frame_share_pct": 3.973,
+      "len_min": 218,
+      "len_max": 323,
+      "len_mean": 265.0
+    },
+    {
+      "subset": "libero_10",
+      "task": "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it",
+      "instruction": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "num_instructions": 1,
+      "episodes": 35,
+      "frames": 8577,
+      "frame_share_pct": 3.136,
+      "len_min": 217,
+      "len_max": 306,
+      "len_mean": 245.1
+    },
+    {
+      "subset": "libero_10",
+      "task": "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it",
+      "instruction": "put the yellow and white mug in the microwave and close it",
+      "num_instructions": 1,
+      "episodes": 34,
+      "frames": 9990,
+      "frame_share_pct": 3.653,
+      "len_min": 224,
+      "len_max": 449,
+      "len_mean": 293.8
+    },
+    {
+      "subset": "libero_10",
+      "task": "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove",
+      "instruction": "put both moka pots on the stove",
+      "num_instructions": 1,
+      "episodes": 29,
+      "frames": 11808,
+      "frame_share_pct": 4.318,
+      "len_min": 341,
+      "len_max": 505,
+      "len_mean": 407.2
+    },
+    {
+      "subset": "libero_10",
+      "task": "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket",
+      "instruction": "put both the alphabet soup and the cream cheese box in the basket",
+      "num_instructions": 1,
+      "episodes": 43,
+      "frames": 11494,
+      "frame_share_pct": 4.203,
+      "len_min": 219,
+      "len_max": 323,
+      "len_mean": 267.3
+    },
+    {
+      "subset": "libero_10",
+      "task": "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket",
+      "instruction": "put both the alphabet soup and the tomato sauce in the basket",
+      "num_instructions": 1,
+      "episodes": 33,
+      "frames": 9571,
+      "frame_share_pct": 3.5,
+      "len_min": 245,
+      "len_max": 367,
+      "len_mean": 290.0
+    },
+    {
+      "subset": "libero_10",
+      "task": "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket",
+      "instruction": "put both the cream cheese box and the butter in the basket",
+      "num_instructions": 1,
+      "episodes": 49,
+      "frames": 12702,
+      "frame_share_pct": 4.645,
+      "len_min": 234,
+      "len_max": 322,
+      "len_mean": 259.2
+    },
+    {
+      "subset": "libero_10",
+      "task": "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate",
+      "instruction": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "num_instructions": 1,
+      "episodes": 38,
+      "frames": 9807,
+      "frame_share_pct": 3.586,
+      "len_min": 214,
+      "len_max": 330,
+      "len_mean": 258.1
+    },
+    {
+      "subset": "libero_10",
+      "task": "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate",
+      "instruction": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "num_instructions": 1,
+      "episodes": 36,
+      "frames": 9020,
+      "frame_share_pct": 3.298,
+      "len_min": 203,
+      "len_max": 342,
+      "len_mean": 250.6
+    },
+    {
+      "subset": "libero_10",
+      "task": "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy",
+      "instruction": "pick up the book and place it in the back compartment of the caddy",
+      "num_instructions": 1,
+      "episodes": 41,
+      "frames": 7634,
+      "frame_share_pct": 2.792,
+      "len_min": 150,
+      "len_max": 259,
+      "len_mean": 186.2
+    },
+    {
+      "subset": "libero_goal",
+      "task": "open_the_middle_drawer_of_the_cabinet",
+      "instruction": "open the middle drawer of the cabinet",
+      "num_instructions": 1,
+      "episodes": 43,
+      "frames": 6019,
+      "frame_share_pct": 2.201,
+      "len_min": 116,
+      "len_max": 196,
+      "len_mean": 140.0
+    },
+    {
+      "subset": "libero_goal",
+      "task": "open_the_top_drawer_and_put_the_bowl_inside",
+      "instruction": "open the top drawer and put the bowl inside",
+      "num_instructions": 1,
+      "episodes": 36,
+      "frames": 7157,
+      "frame_share_pct": 2.617,
+      "len_min": 170,
+      "len_max": 270,
+      "len_mean": 198.8
+    },
+    {
+      "subset": "libero_goal",
+      "task": "push_the_plate_to_the_front_of_the_stove",
+      "instruction": "push the plate to the front of the stove",
+      "num_instructions": 1,
+      "episodes": 33,
+      "frames": 4990,
+      "frame_share_pct": 1.825,
+      "len_min": 117,
+      "len_max": 220,
+      "len_mean": 151.2
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_bowl_on_the_plate",
+      "instruction": "put the bowl on the plate",
+      "num_instructions": 1,
+      "episodes": 49,
+      "frames": 4563,
+      "frame_share_pct": 1.669,
+      "len_min": 79,
+      "len_max": 126,
+      "len_mean": 93.1
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_bowl_on_the_stove",
+      "instruction": "put the bowl on the stove",
+      "num_instructions": 1,
+      "episodes": 48,
+      "frames": 4854,
+      "frame_share_pct": 1.775,
+      "len_min": 90,
+      "len_max": 123,
+      "len_mean": 101.1
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_bowl_on_top_of_the_cabinet",
+      "instruction": "put the bowl on top of the cabinet",
+      "num_instructions": 1,
+      "episodes": 46,
+      "frames": 4574,
+      "frame_share_pct": 1.673,
+      "len_min": 86,
+      "len_max": 123,
+      "len_mean": 99.4
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_cream_cheese_in_the_bowl",
+      "instruction": "put the cream cheese in the bowl",
+      "num_instructions": 1,
+      "episodes": 40,
+      "frames": 4203,
+      "frame_share_pct": 1.537,
+      "len_min": 85,
+      "len_max": 147,
+      "len_mean": 105.1
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_wine_bottle_on_the_rack",
+      "instruction": "put the wine bottle on the rack",
+      "num_instructions": 1,
+      "episodes": 36,
+      "frames": 6224,
+      "frame_share_pct": 2.276,
+      "len_min": 148,
+      "len_max": 254,
+      "len_mean": 172.9
+    },
+    {
+      "subset": "libero_goal",
+      "task": "put_the_wine_bottle_on_top_of_the_cabinet",
+      "instruction": "put the wine bottle on top of the cabinet",
+      "num_instructions": 1,
+      "episodes": 47,
+      "frames": 5004,
+      "frame_share_pct": 1.83,
+      "len_min": 87,
+      "len_max": 146,
+      "len_mean": 106.5
+    },
+    {
+      "subset": "libero_goal",
+      "task": "turn_on_the_stove",
+      "instruction": "turn on the stove",
+      "num_instructions": 1,
+      "episodes": 50,
+      "frames": 4454,
+      "frame_share_pct": 1.629,
+      "len_min": 75,
+      "len_max": 119,
+      "len_mean": 89.1
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_alphabet_soup_and_place_it_in_the_basket",
+      "instruction": "pick up the alphabet soup and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 44,
+      "frames": 6867,
+      "frame_share_pct": 2.511,
+      "len_min": 136,
+      "len_max": 195,
+      "len_mean": 156.1
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_bbq_sauce_and_place_it_in_the_basket",
+      "instruction": "pick up the bbq sauce and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 46,
+      "frames": 6723,
+      "frame_share_pct": 2.458,
+      "len_min": 122,
+      "len_max": 221,
+      "len_mean": 146.2
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_butter_and_place_it_in_the_basket",
+      "instruction": "pick up the butter and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 7102,
+      "frame_share_pct": 2.597,
+      "len_min": 143,
+      "len_max": 207,
+      "len_mean": 157.8
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_chocolate_pudding_and_place_it_in_the_basket",
+      "instruction": "pick up the chocolate pudding and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 50,
+      "frames": 7964,
+      "frame_share_pct": 2.912,
+      "len_min": 145,
+      "len_max": 224,
+      "len_mean": 159.3
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_cream_cheese_and_place_it_in_the_basket",
+      "instruction": "pick up the cream cheese and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 6378,
+      "frame_share_pct": 2.332,
+      "len_min": 116,
+      "len_max": 187,
+      "len_mean": 141.7
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_ketchup_and_place_it_in_the_basket",
+      "instruction": "pick up the ketchup and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 6919,
+      "frame_share_pct": 2.53,
+      "len_min": 135,
+      "len_max": 219,
+      "len_mean": 153.8
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_milk_and_place_it_in_the_basket",
+      "instruction": "pick up the milk and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 6443,
+      "frame_share_pct": 2.356,
+      "len_min": 126,
+      "len_max": 196,
+      "len_mean": 143.2
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_orange_juice_and_place_it_in_the_basket",
+      "instruction": "pick up the orange juice and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 6291,
+      "frame_share_pct": 2.3,
+      "len_min": 114,
+      "len_max": 254,
+      "len_mean": 139.8
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_salad_dressing_and_place_it_in_the_basket",
+      "instruction": "pick up the salad dressing and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 47,
+      "frames": 6200,
+      "frame_share_pct": 2.267,
+      "len_min": 115,
+      "len_max": 216,
+      "len_mean": 131.9
+    },
+    {
+      "subset": "libero_object",
+      "task": "pick_up_the_tomato_sauce_and_place_it_in_the_basket",
+      "instruction": "pick up the tomato sauce and place it in the basket",
+      "num_instructions": 1,
+      "episodes": 42,
+      "frames": 6097,
+      "frame_share_pct": 2.23,
+      "len_min": 120,
+      "len_max": 183,
+      "len_mean": 145.2
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 4487,
+      "frame_share_pct": 1.641,
+      "len_min": 75,
+      "len_max": 168,
+      "len_mean": 99.7
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl from table center and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 46,
+      "frames": 5343,
+      "frame_share_pct": 1.954,
+      "len_min": 93,
+      "len_max": 143,
+      "len_mean": 116.2
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 42,
+      "frames": 6257,
+      "frame_share_pct": 2.288,
+      "len_min": 127,
+      "len_max": 182,
+      "len_mean": 149.0
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl next to the cookie box and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 46,
+      "frames": 5775,
+      "frame_share_pct": 2.112,
+      "len_min": 106,
+      "len_max": 157,
+      "len_mean": 125.5
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl next to the plate and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 47,
+      "frames": 5570,
+      "frame_share_pct": 2.037,
+      "len_min": 95,
+      "len_max": 173,
+      "len_mean": 118.5
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl next to the ramekin and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 45,
+      "frames": 5940,
+      "frame_share_pct": 2.172,
+      "len_min": 109,
+      "len_max": 189,
+      "len_mean": 132.0
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl on the cookie box and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 43,
+      "frames": 4287,
+      "frame_share_pct": 1.568,
+      "len_min": 86,
+      "len_max": 129,
+      "len_mean": 99.7
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl on the ramekin and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 39,
+      "frames": 4472,
+      "frame_share_pct": 1.635,
+      "len_min": 86,
+      "len_max": 154,
+      "len_mean": 114.7
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl on the stove and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 35,
+      "frames": 4747,
+      "frame_share_pct": 1.736,
+      "len_min": 120,
+      "len_max": 167,
+      "len_mean": 135.6
+    },
+    {
+      "subset": "libero_spatial",
+      "task": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate",
+      "instruction": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "num_instructions": 1,
+      "episodes": 44,
+      "frames": 6092,
+      "frame_share_pct": 2.228,
+      "len_min": 117,
+      "len_max": 193,
+      "len_mean": 138.5
+    }
+  ],
+  "episode_length": {
+    "min": 75,
+    "max": 505,
+    "mean": 161.5,
+    "p50": 140,
+    "p95": 289,
+    "frac_shorter_than_200": 0.7815
+  },
+  "action": {
+    "count": 273465,
+    "min": [
+      -0.9375,
+      -0.9375,
+      -0.9375,
+      -0.258214,
+      -0.375,
+      -0.3675,
+      -1.0
+    ],
+    "max": [
+      0.9375,
+      0.9375,
+      0.9375,
+      0.355714,
+      0.375,
+      0.375,
+      1.0
+    ],
+    "mean": [
+      0.062782,
+      0.086841,
+      -0.090373,
+      0.000541,
+      0.005643,
+      -0.005229,
+      -0.049641
+    ],
+    "std": [
+      0.335524,
+      0.378447,
+      0.444729,
+      0.039244,
+      0.063393,
+      0.07797,
+      0.998767
+    ],
+    "abs_max_first6": 0.9375,
+    "quantisation": {
+      "position_xyz": {
+        "grid": 1120,
+        "step": 0.0008928571428571428,
+        "max_residual": 3.24249267578125e-05,
+        "levels_used": 1050
+      },
+      "rotation_rpy": {
+        "grid": 2800,
+        "step": 0.00035714285714285714,
+        "max_residual": 4.1484832763671875e-05,
+        "levels_used": 1050
+      }
+    },
+    "saturation_origin": "teleoperation, not a controller limit. Both channel groups saturate at exactly 1050 = 3 * 350 grid levels, and 350 is robosuite's SpaceMouse axis_scale (robosuite/devices/spacemouse.py:67); LIBERO collected these demos with --pos-sensitivity 1.5 / --rot-sensitivity 1.0 (LIBERO/scripts/collect_demonstration.py:237-246). OSC_POSE itself accepts the full [-1, 1], so |a|>0.9375 is legal but unseen in training.",
+    "physical_span_per_step": {
+      "note": "action * output_max from robosuite/controllers/config/osc_pose.json",
+      "position_max_m": 0.046875,
+      "position_step_m": 4.4643e-05,
+      "rotation_max_rad": 0.1875,
+      "rotation_step_rad": 0.000178571
+    },
+    "frames_at_clip": 18577,
+    "frames_at_clip_pct": 6.793,
+    "gripper_values": {
+      "-1.0": 143520,
+      "1.0": 129945
+    }
+  },
+  "state": {
+    "count": 273465,
+    "min": [
+      -0.48282,
+      -0.325505,
+      0.008128,
+      0.352773,
+      -3.64143,
+      -1.842738,
+      -0.001359,
+      -0.042041
+    ],
+    "max": [
+      0.210318,
+      0.391286,
+      1.366011,
+      3.671426,
+      3.560651,
+      1.38634,
+      0.04234,
+      0.001363
+    ],
+    "mean": [
+      -0.046519,
+      0.034409,
+      0.764553,
+      2.97221,
+      -0.22047,
+      -0.125579,
+      0.026914,
+      -0.027191
+    ],
+    "std": [
+      0.104944,
+      0.151766,
+      0.378517,
+      0.344273,
+      0.906947,
+      0.325392,
+      0.014176,
+      0.014059
+    ],
+    "layout": "eef_pos(3) + axisangle(3) + gripper_qpos(2)",
+    "axisangle_norm": {
+      "min": 1.902858,
+      "max": 4.358818,
+      "mean": 3.147695,
+      "frac_within_0.1rad_of_pi": 0.7329
+    },
+    "axisangle_double_cover": {
+      "note": "robosuite quat2axisangle returns 2*acos(qw) in [0, 2*pi] without folding qw<0 into the qw>=0 hemisphere, so |axisangle| can exceed pi and flips discontinuously when qw crosses 0",
+      "frames_with_norm_over_pi": 130063,
+      "frames_with_norm_over_pi_pct": 47.561,
+      "episodes_with_jump_over_1rad": 0,
+      "episodes_with_jump_pct": 0.0,
+      "largest_single_step_jump_rad": 0.0437
+    }
+  },
+  "joint_state": {
+    "count": 273465,
+    "min": [
+      -0.603077,
+      -0.753794,
+      -0.551052,
+      -3.074212,
+      -2.902789,
+      0.621096,
+      -2.11347
+    ],
+    "max": [
+      0.690054,
+      1.729495,
+      0.747456,
+      -0.05948,
+      2.214043,
+      3.769404,
+      2.903435
+    ],
+    "mean": [
+      0.029118,
+      0.429346,
+      0.028208,
+      -1.909769,
+      -0.006168,
+      2.26373,
+      0.965768
+    ],
+    "std": [
+      0.128984,
+      0.347867,
+      0.170334,
+      0.462105,
+      0.338058,
+      0.337385,
+      0.623362
+    ],
+    "limit_margin_min_rad": [
+      [
+        2.2942,
+        2.2072
+      ],
+      [
+        1.009,
+        0.0333
+      ],
+      [
+        2.3462,
+        2.1498
+      ],
+      [
+        -0.0024,
+        -0.0103
+      ],
+      [
+        -0.0055,
+        0.6833
+      ],
+      [
+        0.6386,
+        -0.0169
+      ],
+      [
+        0.7838,
+        -0.0061
+      ]
+    ],
+    "max_limit_overshoot_rad": 0.0169,
+    "limit_overshoot_note": "small negative margins are OSC tracking overshoot inside the simulator, not corrupt data; magnitudes stay near 1e-2 rad"
+  },
+  "integrity": {
+    "nan_frames": 0,
+    "flag_violations": 0,
+    "reward_violations": 0,
+    "discount_violations": 0,
+    "flag_violation_examples": []
+  },
+  "noop_audit": {
+    "criterion": "||action[:6]|| <= 1e-4 and gripper unchanged (OpenVLA)",
+    "frames_flagged": 0,
+    "frames_flagged_pct": 0.0,
+    "note": "first frame of each episode has no predecessor and counts as no-op by definition",
+    "episodes": 1693,
+    "tiny_eef_motion_frames": 17401,
+    "tiny_eef_motion_pct": 6.363,
+    "tiny_eef_motion_criterion": "||eef_pos[t+1] - eef_pos[t]|| < 1 mm"
+  },
+  "images": {
+    "declared_shape": [
+      256,
+      256,
+      3
+    ],
+    "encoding": "jpeg",
+    "cameras": [
+      "image (agentview)",
+      "wrist_image (robot0_eye_in_hand)"
+    ],
+    "sampled_episodes": 45,
+    "jpeg_bytes_mean": {
+      "image": 19823.7,
+      "wrist_image": 17696.7
+    },
+    "jpeg_bytes_max": {
+      "image": 22736,
+      "wrist_image": 25601
+    }
+  }
+}

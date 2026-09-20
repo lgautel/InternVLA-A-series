@@ -1,0 +1,467 @@
+{
+  "frames": 273465,
+  "episodes": 1693,
+  "fk": {
+    "source_xml": "11 bodies from robosuite robots/panda/robot.xml",
+    "keypoint_bodies": [
+      "link1",
+      "link2",
+      "link3",
+      "link4",
+      "link5",
+      "link6",
+      "link7",
+      "eef"
+    ],
+    "qpos_layout": "joint_state[0:7] + state[6:8]",
+    "eef_body_is_state_position": true,
+    "base_offset_residual_within_episode_m": 0.000346
+  },
+  "arena_bases": {
+    "table": {
+      "episodes": 860,
+      "frames": 105012,
+      "frame_share_pct": 38.4,
+      "measured_base_xpos": [
+        -0.6601,
+        -0.0,
+        0.9121
+      ],
+      "spread_across_episodes_m": 5.6002603986765946e-05,
+      "reference_from_libero_source": [
+        -0.66,
+        0.0,
+        0.912
+      ],
+      "abs_diff_to_reference_m": 6.0628863667977484e-05
+    },
+    "floor": {
+      "episodes": 454,
+      "frames": 66984,
+      "frame_share_pct": 24.49,
+      "measured_base_xpos": [
+        -0.6,
+        -0.0001,
+        0.0
+      ],
+      "spread_across_episodes_m": 1.0030566749903717e-05,
+      "reference_from_libero_source": [
+        -0.6,
+        0.0,
+        0.0
+      ],
+      "abs_diff_to_reference_m": 7.00056282999822e-05
+    },
+    "living_room_table": {
+      "episodes": 199,
+      "frames": 52594,
+      "frame_share_pct": 19.23,
+      "measured_base_xpos": [
+        -0.51,
+        -0.0,
+        0.42
+      ],
+      "spread_across_episodes_m": 1.161695478709098e-05,
+      "reference_from_libero_source": [
+        -0.51,
+        0.0,
+        0.42
+      ],
+      "abs_diff_to_reference_m": 3.8044319807238556e-05
+    },
+    "kitchen_table": {
+      "episodes": 139,
+      "frames": 41241,
+      "frame_share_pct": 15.08,
+      "measured_base_xpos": [
+        -0.66,
+        -0.0,
+        0.912
+      ],
+      "spread_across_episodes_m": 1.916982075908418e-05,
+      "reference_from_libero_source": [
+        -0.66,
+        0.0,
+        0.912
+      ],
+      "abs_diff_to_reference_m": 2.5068478037848507e-05
+    },
+    "study_table": {
+      "episodes": 41,
+      "frames": 7634,
+      "frame_share_pct": 2.79,
+      "measured_base_xpos": [
+        -0.75,
+        0.0,
+        0.912
+      ],
+      "spread_across_episodes_m": 6.58006539200533e-06,
+      "reference_from_libero_source": [
+        -0.75,
+        0.0,
+        0.912
+      ],
+      "abs_diff_to_reference_m": 3.3258631989163644e-05
+    }
+  },
+  "r_pad": {
+    "recomputed_from_this_dataset": 1.8212723272872922,
+    "hardcoded_at_eval": 1.8212722539901733,
+    "abs_diff": 7.329711881887135e-08,
+    "relative_diff": 4.024500931054475e-08,
+    "driver_axis": "z",
+    "global_min_world": [
+      -0.766243,
+      -0.440175,
+      0.908331
+    ],
+    "global_max_world": [
+      0.275922,
+      0.43537,
+      1.583715
+    ],
+    "margin": 0.15
+  },
+  "normalisation_schemes": {
+    "A_lift_world_isotropic": {
+      "description": "current pipeline: Lift world frame, pos / R_pad",
+      "r_pad": 1.8212723272872922,
+      "range_min": [
+        -0.4207,
+        -0.2417,
+        0.4987
+      ],
+      "range_max": [
+        0.1515,
+        0.239,
+        0.8696
+      ],
+      "axis_utilisation": [
+        0.2861,
+        0.2404,
+        0.1854
+      ]
+    },
+    "B_base_frame_isotropic": {
+      "description": "subtract the robot base first, then one isotropic radius",
+      "r_pad": 0.9613106683600195,
+      "range_min": [
+        -0.2145,
+        -0.4579,
+        -0.0038
+      ],
+      "range_max": [
+        0.8696,
+        0.4529,
+        0.6987
+      ],
+      "axis_utilisation": [
+        0.5421,
+        0.4554,
+        0.3513
+      ]
+    },
+    "C_base_frame_per_axis": {
+      "description": "subtract the base, then scale each axis by its own half-span",
+      "scale": [
+        0.521083,
+        0.437772,
+        0.337692
+      ],
+      "centre": [
+        0.314839,
+        -0.002403,
+        0.334023
+      ],
+      "axis_utilisation": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  },
+  "body_statistics": {
+    "link1": {
+      "mean_xyz": [
+        -0.56,
+        0.0,
+        1.245
+      ],
+      "std_xyz": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "range_xyz": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "link2": {
+      "mean_xyz": [
+        -0.56,
+        0.0,
+        1.245
+      ],
+      "std_xyz": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "range_xyz": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "link3": {
+      "mean_xyz": [
+        -0.438335,
+        0.005877,
+        1.51568
+      ],
+      "std_xyz": [
+        0.091482,
+        0.026069,
+        0.051989
+      ],
+      "range_xyz": [
+        0.522228,
+        0.301784,
+        0.365939
+      ]
+    },
+    "link4": {
+      "mean_xyz": [
+        -0.370573,
+        0.009752,
+        1.483895
+      ],
+      "std_xyz": [
+        0.080395,
+        0.041525,
+        0.073661
+      ],
+      "range_xyz": [
+        0.485236,
+        0.317853,
+        0.457972
+      ]
+    },
+    "link5": {
+      "mean_xyz": [
+        -0.060546,
+        0.027808,
+        1.284845
+      ],
+      "std_xyz": [
+        0.098976,
+        0.129764,
+        0.095198
+      ],
+      "range_xyz": [
+        0.59818,
+        0.758941,
+        0.539446
+      ]
+    },
+    "link6": {
+      "mean_xyz": [
+        -0.060546,
+        0.027808,
+        1.284845
+      ],
+      "std_xyz": [
+        0.098976,
+        0.129764,
+        0.095198
+      ],
+      "range_xyz": [
+        0.59818,
+        0.758941,
+        0.539446
+      ]
+    },
+    "link7": {
+      "mean_xyz": [
+        0.019554,
+        0.032133,
+        1.27742
+      ],
+      "std_xyz": [
+        0.100152,
+        0.156725,
+        0.095027
+      ],
+      "range_xyz": [
+        0.60831,
+        0.875545,
+        0.558948
+      ]
+    },
+    "eef": {
+      "mean_xyz": [
+        0.012485,
+        0.034448,
+        1.082537
+      ],
+      "std_xyz": [
+        0.103173,
+        0.151798,
+        0.091957
+      ],
+      "range_xyz": [
+        0.63733,
+        0.716804,
+        0.457643
+      ]
+    }
+  },
+  "redundancy": {
+    "static_bodies": [
+      "link1",
+      "link2"
+    ],
+    "coincident_body_pairs": [
+      [
+        "link1",
+        "link2",
+        0.0
+      ],
+      [
+        "link5",
+        "link6",
+        0.0
+      ]
+    ],
+    "moving_position_dims_of_24": 18,
+    "independent_position_dims_of_24": 15,
+    "independent_bodies": [
+      "link1",
+      "link3",
+      "link4",
+      "link5",
+      "link7",
+      "eef"
+    ],
+    "note": "moving = axes with non-zero variance; independent additionally collapses bodies whose world position coincides at every frame"
+  },
+  "quaternion": {
+    "convention": "xyzw, hemisphere qw >= 0 (matches keypoints_meta.json)",
+    "frames_with_qw_below_0.05": {
+      "link1": 0,
+      "link2": 0,
+      "link3": 0,
+      "link4": 8106,
+      "link5": 2415,
+      "link6": 20,
+      "link7": 186005,
+      "eef": 165783
+    },
+    "sign_flips_between_consecutive_frames": {
+      "link1": 0,
+      "link2": 0,
+      "link3": 0,
+      "link4": 355,
+      "link5": 90,
+      "link6": 2,
+      "link7": 3652,
+      "eef": 3559
+    },
+    "max_l2_step_between_consecutive_frames": {
+      "link1": 0.02,
+      "link2": 0.0304,
+      "link3": 0.03,
+      "link4": 2.0,
+      "link5": 2.0,
+      "link6": 2.0,
+      "link7": 2.0,
+      "eef": 2.0
+    },
+    "total_sign_flips": 7658,
+    "component_range_xyzw": {
+      "link1": [
+        0.0,
+        0.0,
+        0.6352,
+        0.0589
+      ],
+      "link2": [
+        0.3007,
+        0.8615,
+        0.9694,
+        0.3518
+      ],
+      "link3": [
+        0.4632,
+        1.1288,
+        0.7319,
+        0.3571
+      ],
+      "link4": [
+        1.015,
+        1.5658,
+        1.5423,
+        0.5993
+      ],
+      "link5": [
+        1.6916,
+        1.9997,
+        0.7609,
+        0.8361
+      ],
+      "link6": [
+        1.7351,
+        1.2397,
+        1.3078,
+        0.9687
+      ],
+      "link7": [
+        2.0,
+        1.9483,
+        0.9739,
+        0.6919
+      ],
+      "eef": [
+        1.9998,
+        1.9997,
+        1.4146,
+        0.5655
+      ]
+    },
+    "static_position_bodies_still_rotate": {
+      "link1": true,
+      "link2": true
+    }
+  },
+  "history_window": {
+    "H": 200,
+    "chunk_C": 50,
+    "padding_fraction": 0.5536,
+    "episodes_longer_than_H": 370,
+    "episodes_longer_than_H_pct": 21.85,
+    "per_suite": {
+      "libero_spatial": {
+        "episodes": 432,
+        "max_history_reached": 192,
+        "episodes_that_can_fill_H": 0
+      },
+      "libero_object": {
+        "episodes": 454,
+        "max_history_reached": 200,
+        "episodes_that_can_fill_H": 7
+      },
+      "libero_goal": {
+        "episodes": 428,
+        "max_history_reached": 200,
+        "episodes_that_can_fill_H": 18
+      },
+      "libero_10": {
+        "episodes": 379,
+        "max_history_reached": 200,
+        "episodes_that_can_fill_H": 345
+      }
+    }
+  }
+}
