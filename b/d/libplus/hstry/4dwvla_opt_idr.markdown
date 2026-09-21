@@ -8,10 +8,20 @@ use_fast_action_tokens=true
 home的位置比采数时低啊
 
 
-TODO
+# TODO
 1. **FAST 的输入归一化需要单独核对。** 当前 `InternVLA-A1.5` transform 链默认用 `mean_std` 归一化，而官方 FAST 以每个动作维度的 `q01/q99` 映射到 `[-1,1]`。如果同一个归一化后的 action 同时喂给 flow matching 和 FAST，两个分支可能处于不一致的数值空间。
 
 腕部相机:RealSense D435I SN: 420122070525
 三方相机:RealSense D435I SN: 250222073513
 
 6R6P1fay
+
+## Debug
+
+真机上遇到的问题
+
+trn_strategy 发现的代码问题, markdown上已经
+
+修改一份真机版本重跑
+
+然后是libero-plus的,结合zwy的实验(注意该实验尚未没验证过数据增强是否正确,没强调训推一致性,推理时的代码也没思考过)

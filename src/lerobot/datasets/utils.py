@@ -358,8 +358,13 @@ def write_tasks(tasks: pandas.DataFrame, local_dir: Path) -> None:
 
 
 def load_tasks(local_dir: Path) -> pandas.DataFrame:
-    tasks = pd.read_parquet(local_dir / DEFAULT_TASKS_PATH)
-    return tasks
+    parquet_path = local_dir / DEFAULT_TASKS_PATH
+    if parquet_path.exists():
+        return pd.read_parquet(parquet_path)
+    jsonl_path = local_dir / "meta" / "tasks.jsonl"
+    if jsonl_path.exists():
+        return pd.read_json(jsonl_path, lines=True)
+    raise FileNotFoundError(f"No tasks file found at {parquet_path} or {jsonl_path}")
 
 
 def write_episodes(episodes: Dataset, local_dir: Path) -> None:
@@ -385,12 +390,16 @@ def write_episodes(episodes: Dataset, local_dir: Path) -> None:
 
 
 def load_episodes(local_dir: Path) -> datasets.Dataset:
-    episodes = load_nested_dataset(local_dir / EPISODES_DIR)
-    # Select episode features/columns containing references to episode data and videos
-    # (e.g. tasks, dataset_from_index, dataset_to_index, data/chunk_index, data/file_index, etc.)
-    # This is to speedup access to these data, instead of having to load episode stats.
-    episodes = episodes.select_columns([key for key in episodes.features if not key.startswith("stats/")])
-    return episodes
+    episodes_dir = local_dir / EPISODES_DIR
+    if episodes_dir.is_dir() and any(episodes_dir.rglob("*.parquet")):
+        episodes = load_nested_dataset(episodes_dir)
+        episodes = episodes.select_columns([key for key in episodes.features if not key.startswith("stats/")])
+        return episodes
+    jsonl_path = local_dir / "meta" / "episodes.jsonl"
+    if jsonl_path.exists():
+        df = pd.read_json(jsonl_path, lines=True)
+        return datasets.Dataset.from_pandas(df)
+    raise FileNotFoundError(f"No episodes found at {episodes_dir} or {jsonl_path}")
 
 
 def load_image_as_numpy(

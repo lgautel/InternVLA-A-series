@@ -1,0 +1,45 @@
+# Semantic admission thresholds for b/s/Frk2/ds/verify_franka3_semantics.py
+#
+# One file per dataset family.  These values are calibrated against the measured
+# behaviour of the franka3 plug-into-socket capture; see b/d/Frk2/ds2_pblm_solv1.md §3
+# for where each number comes from.
+
+# G1 (BLOCK) - highest same-frame affine R^2 an action dim may have against the state.
+# Absolute joint targets legitimately track the state closely (measured: q3 0.9985),
+# and there is no data fix for that -- it is what "absolute joint target" means.
+# What IS fixable is a channel with *no* residual at all.  0.9999 separates the two:
+# on the raw capture only the gripper (R^2 = 1.000000) trips it.
+# The operational risk from the merely-high arm correlations is quantified by G4.
+r2_max: 0.9999
+
+# G2 - fraction of frames where action[j] may equal state[j] bit-exactly.
+bit_exact_max: 0.001
+
+# G3 - |unique(state[j])| / |unique(action[j])|.  Below 1.0 means the state channel
+# lost precision relative to the command, i.e. it was computed from it.
+derived_unique_ratio_min: 1.0
+
+# G4 - copy shortcut on the chunk prefix that is actually executed on the robot.
+# n_exec must match the deployed inference server setting.
+copy_r2_max: 0.80
+n_exec: 10
+chunk_size: 50
+
+# G5 - action quantiles must be inside state quantiles, else open-loop drift.
+quantile_slack: 0.0
+
+# G6 - sensor authenticity.  A real Franka encoder repeats bit-exactly on <2% of
+# consecutive frames; a value held from a command repeats on >70%.
+# sensor_resolution is one order of magnitude below the Franka Hand width
+# resolution (~1e-4 m) and the joint encoder resolution.
+zero_diff_max: 0.10
+sensor_resolution: 1.0e-5
+
+# G7 - require real frame-interval jitter, or an explicit "resampled" declaration.
+# 1e-4 s (0.1 ms) sits above float32 timestamp rounding (~5e-7 s on a 66.67 ms grid)
+# but far below the jitter a real 15 Hz capture loop shows (~1 ms).
+dt_std_min: 1.0e-4
+
+# G8 - minimum per-axis spread of the end-effector position, in metres.
+# 0.02 m corresponds to roughly a +-2 cm socket placement grid.
+ee_pos_std_min: 0.02

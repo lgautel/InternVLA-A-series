@@ -139,7 +139,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
         # Check version
-        check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION)
+        check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION, enforce_breaking_major=False)
 
         self.delta_timestamps = None
         self.delta_indices = None

@@ -386,22 +386,26 @@ class FASTInternVLAA15ActionTokenizerTransformFn(DataTransformFn):
     stop_token_2: int = 198     # Second stop token (newline)
     
     def __post_init__(self):
+        self._tokenizers_loaded = False
+        if self.assistant_end_tokens is None:
+            self.assistant_end_tokens = [248045, 74455, 198, 248068, 271, 248069, 271]
+
+    def _ensure_tokenizers(self):
+        if self._tokenizers_loaded:
+            return
         logging.info("Loading FAST tokenizer from %s", self.action_tokenizer_name)
         self.action_tokenizer = AutoProcessor.from_pretrained(
             self.action_tokenizer_name,
             trust_remote_code=True,
             **_fast_processor_kwargs(self.action_tokenizer_name),
-        ) 
+        )
         self.action_tokenizer.time_horizon = self.chunk_size
         self.action_tokenizer.action_dim = self.max_action_dim
-        # Load Qwen3.5 tokenizer
         self.qwen35_tokenizer = Qwen3_5Tokenizer.from_pretrained(
             self.qwen35_model_name
         )
         ensure_qwen35_action_tokens(self.qwen35_tokenizer)
-        # Initialize assistant_end_tokens if not set
-        if self.assistant_end_tokens is None:
-            self.assistant_end_tokens = [248045, 74455, 198, 248068, 271, 248069, 271]
+        self._tokenizers_loaded = True
 
     def _act_tokens_to_qwen35_tokens(self, tokens: torch.Tensor | np.ndarray | list) -> torch.Tensor:
         """
@@ -544,6 +548,7 @@ class FASTInternVLAA15ActionTokenizerTransformFn(DataTransformFn):
             List of action arrays with shape (num_actions, action_dim).
             None is returned for sequences with no tokens or invalid tokens.
         """
+        self._ensure_tokenizers()
         batch_actions = []
         for fast_ids in batch_fast_token_ids:
             if fast_ids is None or len(fast_ids) == 0:
@@ -563,6 +568,7 @@ class FASTInternVLAA15ActionTokenizerTransformFn(DataTransformFn):
         return batch_actions
 
     def __call__(self, data: DataDict) -> DataDict:
+        self._ensure_tokenizers()
         action = data[ACTION]
         device = action.device if isinstance(action, torch.Tensor) else torch.device("cpu")
         

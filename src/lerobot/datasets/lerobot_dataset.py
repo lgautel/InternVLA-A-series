@@ -159,7 +159,7 @@ class LeRobotDatasetMetadata:
 
     def load_metadata(self):
         self.info = load_info(self.root)
-        check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
+        check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION, enforce_breaking_major=False)
         self.tasks = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
@@ -208,9 +208,13 @@ class LeRobotDatasetMetadata:
                 f"Episode index {ep_index} out of range. Episodes: {len(self.episodes) if self.episodes else 0}"
             )
         ep = self.episodes[ep_index]
-        chunk_idx = ep[f"videos/{vid_key}/chunk_index"]
-        file_idx = ep[f"videos/{vid_key}/file_index"]
-        fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
+        vid_chunk_key = f"videos/{vid_key}/chunk_index"
+        if vid_chunk_key in ep:
+            chunk_idx = ep[vid_chunk_key]
+            file_idx = ep[f"videos/{vid_key}/file_index"]
+            fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
+        else:
+            fpath = self.video_path.format(video_key=vid_key, episode_chunk=0, episode_index=ep_index)
         return Path(fpath)
 
     @property
