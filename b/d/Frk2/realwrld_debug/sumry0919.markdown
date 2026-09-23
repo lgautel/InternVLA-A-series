@@ -491,7 +491,7 @@ InternVLA-A1.5 论文 [arXiv:2607.04988](https://arxiv.org/abs/2607.04988) 只�
 训练数据是 30 Hz，所以：
 
 \[
-\text{his_len} = \min(\text{frame\_index}, 200)
+$$\text{his_len} = \min(\text{frame\_index}, 200)$$
 \]
 
 它就是个“本回合过了多少个 \(1/30\) 秒”的时钟。示教统计表明，**最早出现夹爪闭合的帧在 `his_len = 120`**，到 `his_len = 200` 时闭合概率 0.764。
@@ -707,3 +707,217 @@ flowchart TB
 | 指望 `his_len` 修复解决历史轨迹形态 | **无效** | 3 Hz 墙钟下相邻历史帧位移是训练的 ~10 倍，内容仍 OOD |
 
 所以 `his_len` 的问题可以认为**已经关闭**：计数语义和边界条件都已修正，服务端日志也证实了每控制步 +1 并能达到 200。但它不是夹爪不闭合的**唯一**根因，更不是插插座任务失败的唯一根因；闭合事件被 chunk 截断、执行器二值语义、低速执行导致的形态 OOD 是后续仍需处理的问题。
+
+# 附录TMP,对话
+
+`n_exec=50` 只能打掉“闭合动作停在 chunk 后段、没被执行”这一层，不能单独让夹爪夹上。q7 贴在 0.4843 rad，是软件把目标裁到训练观测下界之后，阻塞运动又等到手臂到达该目标；换成阻抗控制但保留这道裁剪，平衡点仍然是这个下界。
+
+## 1. `n_exec=50` 能不能解决夹爪不闭合？
+
+不能把它当成解法。它只去掉截断，夹爪仍要过执行语义、到位姿和力控这三关。
+
+模型每次生成 50 步，服务端只把前 `n_exec` 步放进返回值：
+
+```478:488:b/x/4dwvla_ext/vla_inference_server.py
+                full_chunk = unnormalize_fn(
+                    {ACTION: action_pred[:, :actual_action_dim]}
+                )[ACTION]
+                ...
+                normalized_action = action_pred[:n_exec, :actual_action_dim]
+```
+
+客户端不按自己的 `--n-exec` 再切一刀，队列里有多少就执行多少，空了才重新推理。所以必须改的是服务端的 `--n-exec 50`。只改客户端参数，返回的仍是 5 步。
+
+9 月 19 日最后一次推理里，50 步计划是：
+
+| chunk 内步号 | `action_grip` |
+|---:|---|
+| 0–4（实际执行） | 最大 0.232 |
+| 第 7 步 | 首次 ≥ 0.3 |
+| 第 21 步 | 首次 ≥ 0.5 |
+| 第 39 步 | 首次 ≥ 0.8，之后最大 0.948 |
+
+若这一整段都被执行，夹爪通道确实会走到 0.8。但这是在“那一次推理的状态上”成立的。`n_exec=50` 会改掉后面的状态，不能把这条日志直接外推成“下一次一定夹上”。
+
+它解决不了的有四件：
+
+1. **闭合仍可能发生在错误位姿。** 第 39 步的夹爪命令，是假设前 38 步都按模型原样执行后的未来。q7 每步被裁到 0.4843，真实关节已经离开这条计划。开放环跑完 50 步，可能在插头旁边空夹，也可能在还没对准时夹。
+2. **连续模式会先把宽度降到 60 mm 以下，然后当前 handoff 拒绝抓取。** `a=0.30` 时目标宽度是 `0.08×(1-0.30)=56 mm`。`is_open` 在宽度 `< 60 mm` 时为假。等 chunk 第 39 步 `a≥0.8` 到来，`close_gripper()` 仍然不会被调用。
+3. **图像会冻住约 15 秒。** 现在每步大约 0.3 秒。50 步内不重新看相机。训练时大约每帧都有新图像；这里插头、碰撞和手指都在动，策略看不见。
+4. **训练分布更远。** 训练等价于每一步都用真实下一状态重新规划，接近 `n_exec=1`。`n_exec=50` 是往相反方向走。
+
+若只想验证“后段闭合命令能不能到达硬件”，可以单次把服务端设为 `--n-exec 50`，同时把 `max_steps` 收到 50 或 100，并有人守着急停。这是实验，不是修复。
+
+## 2. “实际 keypoint 历史并不是模型原计划的轨迹”
+
+历史里存的是测到的关节角，不是模型输出的动作。中间有两道改写。
+
+一次推理的计划可以看成：
+
+```text
+当前测得 q7 = 0.4843
+模型未来三步的 q7 命令：0.460、0.440、0.420
+```
+
+执行前 `check_action_safety()` 把低于训练观测下界的值裁掉：
+
+```205:214:b/x/4dwvla_ext/franky_joint_env.py
+    # L2: Training range + margin
+    below_t = clipped < ACTION_LIMIT_LOWER
+    above_t = clipped > ACTION_LIMIT_UPPER
+    if np.any(below_t) or np.any(above_t):
+        ...
+        clipped = np.clip(clipped, ACTION_LIMIT_LOWER, ACTION_LIMIT_UPPER)
+```
+
+q7 的下界是 `TRAIN_ARM_MIN[6] = 0.4843`，余量为 0。于是三步命令都变成 0.4843。速度限幅救不了它：`|0.460-0.4843|=0.024`，小于 `MAX_JOINT_STEP_RAD=0.15`，L3 不触发。
+
+然后 `move_joints()` 发一个阻塞 waypoint，直到手臂停在这个裁剪后的目标上。客户端写入历史的是执行前测到的关节，不是原始 action：
+
+```228:232:b/x/4dwvla_ext/franka_vla_client.py
+            # Record state *before* execution: training's his_kpts contains
+            # frames strictly earlier than the current frame
+            self._state_history.record(state_before[:7])
+```
+
+服务端对这串测得关节做正运动学。模型原计划是腕部继续转下去；历史里连续几格却是同一个 q7。下一次推理时模型看到“腕没转”，于是再规划一次向下的 q7，再被裁回同一点。
+
+9 月 19 日这 300 步里，从 step 5 到 step 299，模型的 q7 命令每次都低于 0.4843，每次都被裁回去。所以 keypoint 历史的时间长度是对的，腕部轨迹的内容是“贴在下界上的平台”，不是模型那条未裁剪的下降曲线。
+
+chunk 内部还有第二层偏离。第 2 步动作是按“第 1 步已经到达未裁剪目标”来预测的。真实机器人停在裁剪目标上，第 2 步仍按旧计划执行，不再用新观测修正。`n_exec` 越大，这种偏离累积得越久。
+
+## 3. 改成阻抗控制，q7 还会不会贴在下界？
+
+只把阻塞 waypoint 换成阻抗跟踪，q7 仍会贴在 0.4843。贴边的平衡点是软件目标，不是运动发生器的种类。
+
+现在的链路是：
+
+```text
+模型命令 0.42
+→ 安全层改成 0.4843
+→ JointWaypointMotion 等到关节到达 0.4843
+→ 下一次观测就是 0.4843
+```
+
+关节阻抗或笛卡尔阻抗的平衡点同样是这个目标。目标一直是 0.4843，弹簧最终就把关节拉到 0.4843。差别只是不再每步急停，而是平滑靠过去。日志里跟踪误差大约 0.001 rad，说明手臂已经在忠实执行裁剪后的命令，不是被插座挡住了。
+
+阻抗要改变这个现象，必须同时满足两件事：
+
+- 动作目标不再被裁到观测最小值 0.4843。示教里 `action.arm[6]` 可以低到 0.3695，观测最小值才是 0.4843；动作本来就比观测更超前。
+- 一个控制周期不等到收敛就采样。30 Hz、约 33 ms 时，手臂只走完弹簧位移的一小段。这样可以出现“命令是 0.42，测到的 q7 仍高于 0.4843”。
+
+这才像采集示教时的超前：动作分布比观测分布宽，是因为一个周期内没跟上，不是因为有人把命令抬回观测下界。
+
+若策略闭环的平衡点始终是“每步都命令 0.40”，那么即使用阻抗，只要这个目标保持得够久，q7 仍会掉到 0.40，并且掉出训练观测范围。阻抗恢复的是滞后，不是一道新的安全边界。安全边界仍然要由裁剪或接触约束来做。
+
+另外，franky 的 waypoint 底层本来就是力矩伺服。现在缺的是“更新目标后立即读状态”，不是机器人里没有阻抗。
+
+## 4. 场景、碰撞和夹爪动力学怎么跟训练时序错开？
+
+训练是 30 Hz，一帧 33 ms。真机大约 3.2 Hz，一步约 300 ms，而且这一步里手臂先走完、再处理夹爪、然后才允许下一次采样。空间上每步关节变化只比示教大了约 1.27 倍；被拉长的是这些变化发生的真实时间和“看不见的中间过程”。
+
+用一次插入接触来看。
+
+示教里，插头碰到插座沿：
+
+```text
+t = 0 ms     图像：插头刚接触边缘
+t = 33 ms    手腕横向修正约 0.5 mm
+t = 66 ms    再修正，插头滑进孔
+t = 100 ms   开始下压
+```
+
+策略在碰撞后的两三帧里就能改动作。
+
+现在同一次接触落在一个阻塞 waypoint 里面：
+
+```text
+t = 0 ms      读取图像和关节，模型发出本步目标
+t = 0–250 ms  手臂自行加速、接触、减速；期间没有新图像，也不能改目标
+t = 250 ms    运动结束，手臂停住，接触力卸掉
+t = 250–400 ms 若夹爪也要动，再串行执行 move_width 或 grasp
+t = 400 ms    才把新的状态送去下一次推理
+```
+
+于是会出现训练里很少见的三段动力学：
+
+- **碰撞被一步吞掉。** 插头可能在这 250 ms 里滑过孔、卡在倒角上，或把插座顶开。训练时这些都是可观测、可纠正的中间帧；这里它们只在步末留下一个结果姿态。
+- **接触力是断续的。** waypoint 到达后目标误差为零，手臂不再往下压。插入需要持续的力，现在变成“推一下、停一下”。示教是连续的人手轨迹，没有这种每步归零。
+- **夹爪和手臂被串行化。** 示教约 17 帧、0.57 秒，手指大约每帧收 1.75 mm，同时手臂还在动。`step()` 先 `move_joints()`，再 `move_width()` 或 `close()`。`close()` 失败时最长可以阻塞到超时（夹爪类里是 6 秒量级）。这一秒里相机和关节历史都不更新，但手指已经在真实世界里合拢。模型下一次看到的是一个突然变窄的宽度，而不是它在 30 Hz 上学过的那条斜坡。
+
+场景也按墙钟漂移。200 格历史在训练里覆盖约 6.7 秒，在 3.2 Hz 下覆盖约 63 秒。keypoint 历史只有机器人自身，插头、线缆和插座的移动只存在于图像里。图像又要等 `n_exec` 步才更新一次。所以模型用“6.7 秒的机器人轨迹”去解释一段已经过了一分钟的接触过程。
+
+## 5. `grasp_handoff` 要怎么改，为什么？
+
+当前连续模式在 `a ≥ 0.8` 时确实返回 `grasp_handoff`，但调用力控抓取前又要求夹爪“仍然算张开”：
+
+```439:447:b/x/4dwvla_ext/franky_joint_env.py
+            if cmd == "grasp_handoff":
+                if self._controller.gripper_is_open():
+                    logger.info(...)
+                    self._controller.close_gripper()
+                    self._last_gripper_cmd_w = None
+```
+
+`is_open` 的定义是：没有夹住，且宽度 ≥ 60 mm。
+
+```338:343:b/x/franky_ext/franka_libfranka_gripper.py
+    def is_open(self) -> bool:
+        if self._hardware_holding():
+            return False
+        width = self._width_m()
+        if width is not None:
+            return width >= _OPEN_WIDTH_M
+```
+
+这个条件适合二值模式：手指要么全开，要么一次 `grasp` 到目标。连续模式故意在力控之前先把手指收到 60 mm 以下，于是把自己锁死。
+
+数字例子：
+
+```text
+起始宽度 66.4 mm，is_open = True
+
+a = 0.23 → 目标宽度 61.6 mm → move_width
+         → 仍 ≥ 60 mm，is_open 仍为 True
+
+a = 0.30 → 目标宽度 56.0 mm → move_width
+         → is_open 变成 False
+
+a = 0.85 → 决策已是 grasp_handoff
+         → is_open 为 False，close_gripper() 被跳过
+         → 手指停在 56 mm，10 mm 的插头没有被夹住
+```
+
+该问的不是“手指是不是还张着”，而是“是不是已经夹住了”。`gripper_holding()` 走的是宽度窗口：插头标定为 10 mm、容差 8 mm，也就是大约 `[2, 18]` mm。没进这个窗口，就还可以抓；已经在窗口里，`close()` 自己也会跳过，避免对一次正在维持的 grasp 再发一次。
+
+建议的执行段是：
+
+```python
+GRASP_RETRY_COOLDOWN_S = float(os.environ.get("VLA_GRASP_RETRY_COOLDOWN_S", "1.0"))
+
+# __init__ / reset 里：
+self._last_grasp_attempt_t = float("-inf")
+
+# step() 的 continuous 分支：
+if cmd == "grasp_handoff":
+    if not self._controller.gripper_holding():
+        now = time.monotonic()
+        if now - self._last_grasp_attempt_t >= GRASP_RETRY_COOLDOWN_S:
+            logger.info(
+                "[step %d] gripper continuous grasp_handoff action=%.4f w_meas=%s",
+                self._step_count, action_grip, w_meas,
+            )
+            self._last_grasp_attempt_t = now
+            self._controller.close_gripper()
+            self._last_gripper_cmd_w = None
+```
+
+三种结果：
+
+| 情形 | 行为 |
+|---|---|
+| 宽度 56 mm，`a=0.85`，还没夹住 | 不再被 `is_open` 拦住，调用 `close_gripper()`，目标宽度 10±8 mm |
+| 抓到后宽度 10 mm，`holding=True` | 不再发 grasp。libfranka 对一次正在维持的 grasp 再发 grasp 会失败 |
+| 空夹，手指合到约 0 mm，不在 `[2,18]` mm | `close()` 抛错，现有代码记 warning。若没有冷却，后面每步 `a≥0.8` 都会再阻塞一次，控制频率会像之前的 `move_width` 一样塌掉。1 秒冷却表示失败后最多每秒重试一次 |
+
+二值模式可以继续用 `gripper_is_open()`。那里没有“先收到 56 mm、再力控”的斜坡，`is_open` 是正确的锁存。要改的是 `continuous` 这一支。

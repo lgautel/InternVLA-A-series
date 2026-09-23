@@ -336,6 +336,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             video_frames = self._query_videos(query_timestamps, ep_idx)
 
             if self.image_transforms is not None:
+                self.image_transforms.begin_sample()
                 image_keys = self.meta.camera_keys
                 for cam in image_keys:
                     video_frames[cam] = self.image_transforms(video_frames[cam])

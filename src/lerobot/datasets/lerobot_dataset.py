@@ -1074,6 +1074,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**video_frames, **item}
 
         if self.image_transforms is not None:
+            self.image_transforms.begin_sample()
             image_keys = self.meta.camera_keys
             for cam in image_keys:
                 item[cam] = self.image_transforms(item[cam])

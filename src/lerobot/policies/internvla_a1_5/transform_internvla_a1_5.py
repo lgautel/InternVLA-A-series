@@ -29,6 +29,21 @@ LABEL_MODE_FAST = 2
 LABEL_MODE_BOTH = 3
 
 
+def _resolve_fast_local_dir(model_name_or_path: str) -> str:
+    """Resolve a HF repo name to its local cache snapshot directory, if available."""
+    local_path = Path(model_name_or_path)
+    if local_path.is_dir() and (local_path / "tokenizer.json").is_file():
+        return str(local_path)
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        cached = try_to_load_from_cache(model_name_or_path, "tokenizer.json")
+        if cached and Path(cached).is_file():
+            return str(Path(cached).parent)
+    except Exception:
+        pass
+    return model_name_or_path
+
+
 def _fast_processor_kwargs(model_name_or_path: str) -> dict[str, str]:
     tokenizer_file = Path(model_name_or_path) / "tokenizer.json"
     if tokenizer_file.is_file():
@@ -393,11 +408,13 @@ class FASTInternVLAA15ActionTokenizerTransformFn(DataTransformFn):
     def _ensure_tokenizers(self):
         if self._tokenizers_loaded:
             return
-        logging.info("Loading FAST tokenizer from %s", self.action_tokenizer_name)
+        local_dir = _resolve_fast_local_dir(self.action_tokenizer_name)
+        logging.info("Loading FAST tokenizer from %s (resolved: %s)", self.action_tokenizer_name, local_dir)
         self.action_tokenizer = AutoProcessor.from_pretrained(
-            self.action_tokenizer_name,
+            local_dir,
             trust_remote_code=True,
-            **_fast_processor_kwargs(self.action_tokenizer_name),
+            local_files_only=True,
+            **_fast_processor_kwargs(local_dir),
         )
         self.action_tokenizer.time_horizon = self.chunk_size
         self.action_tokenizer.action_dim = self.max_action_dim

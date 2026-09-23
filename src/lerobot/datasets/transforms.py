@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import collections
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -179,6 +180,9 @@ class ImageTransformsConfig:
     # By default, transforms are applied in Torchvision's suggested order (shown below).
     # Set this to True to apply them in a random order.
     random_order: bool = False
+    p_schedule: list[float] = field(default_factory=lambda: [1.0])
+    p_epoch_interval: int = 1
+    disabled_tfs: list[str] = field(default_factory=list)
     tfs: dict[str, ImageTransformConfig] = field(
         default_factory=lambda: {
             "brightness": ImageTransformConfig(
@@ -234,11 +238,16 @@ class ImageTransforms(Transform):
     def __init__(self, cfg: ImageTransformsConfig) -> None:
         super().__init__()
         self._cfg = cfg
+        self._p_schedule = cfg.p_schedule
+        self._p_interval = max(cfg.p_epoch_interval, 1)
+        self._p = cfg.p_schedule[0]
+        self._augment_this_sample = True
 
         self.weights = []
         self.transforms = {}
+        disabled = set(cfg.disabled_tfs)
         for tf_name, tf_cfg in cfg.tfs.items():
-            if tf_cfg.weight <= 0.0:
+            if tf_cfg.weight <= 0.0 or tf_name in disabled:
                 continue
 
             self.transforms[tf_name] = make_transform_from_config(tf_cfg)
@@ -255,5 +264,21 @@ class ImageTransforms(Transform):
                 random_order=cfg.random_order,
             )
 
+    def update_p_on_epoch(self, epoch_count: int):
+        idx = min(epoch_count // self._p_interval, len(self._p_schedule) - 1)
+        new_p = self._p_schedule[idx]
+        if new_p != self._p:
+            logging.info(
+                f"[ImageTransforms] p schedule: {self._p:.2f} → {new_p:.2f} "
+                f"(epoch {epoch_count}, interval {self._p_interval}, "
+                f"schedule idx {idx}/{len(self._p_schedule)-1})"
+            )
+        self._p = new_p
+
+    def begin_sample(self):
+        self._augment_this_sample = (self._p >= 1.0) or (torch.rand(1).item() <= self._p)
+
     def forward(self, *inputs: Any) -> Any:
+        if not self._augment_this_sample:
+            return inputs[0] if len(inputs) == 1 else inputs
         return self.tf(*inputs)

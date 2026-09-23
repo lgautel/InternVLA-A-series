@@ -198,14 +198,11 @@ ARGS=(
   --dataset.use_external_stats=false
   --dataset.dist_loading=false
 
-  # ── Image augmentation ──
-  # §6.6 P1 建议只开 brightness/contrast/saturation, 但 draccus 不支持
-  # dict[str, dataclass] 的嵌套 CLI 覆写 (--dataset.image_transforms.tfs.*.weight).
-  # 折中: enable=true + max_num_transforms=3, 从默认 6 种变换中随机选 3 种.
-  # 对 warmup 阶段影响可忽略, 后续 Phase 2 SFT 可通过代码修改精确控制.
+  # ── Image augmentation (§6.6 P1: brightness/contrast/saturation/hue/sharpness, no affine) ──
   --dataset.image_transforms.enable=true
   --dataset.image_transforms.max_num_transforms=3
   --dataset.image_transforms.random_order=false
+  '--dataset.image_transforms.disabled_tfs=["affine"]'
 
   # ── Training ──
   --seed=42

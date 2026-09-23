@@ -161,6 +161,7 @@ Keypoint: 56D (8 x 7D)                            ✅
 1. **`b/s/Frk2/frk2_plug_warmup_launch.sh`**
    - 删除 3 行 `--dataset.image_transforms.tfs.*.weight=0.0` (draccus 不支持)
    - 添加 `HF_HUB_OFFLINE=1` 和 `TRANSFORMERS_OFFLINE=1`
+   - 添加 `'--dataset.image_transforms.disabled_tfs=["affine"]'` 禁用 affine 变换
 
 2. **`src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py`**
    - `FASTInternVLAA15ActionTokenizerTransformFn.__post_init__`: 改为懒加载 (`_ensure_tokenizers()`)
@@ -179,6 +180,17 @@ Keypoint: 56D (8 x 7D)                            ✅
 
 6. **`src/lerobot/datasets/factory.py`**
    - ImageNet stats: `stats is None` 时初始化空 dict
+
+8. **`src/lerobot/datasets/transforms.py`**
+   - `ImageTransformsConfig`: 添加 `disabled_tfs: list[str]` 字段
+   - `ImageTransforms.__init__`: 跳过 `disabled_tfs` 中列出的变换
+
+### disabled_tfs Smoke Test 验证 (2026-09-21)
+
+- `disabled_tfs=["affine"]` CLI 参数通过 draccus 正确解析
+- 活跃变换: brightness, contrast, saturation, hue, sharpness (5 种, affine 被排除)
+- 10 steps 训练正常: loss=8.851, loss_action=0.329, loss_kpt_cur=0.2031, loss_kpt_fut=0.3081
+- `End of training` 确认, 无报错
 
 7. **数据集转换**: v2.1 → v3.0
    - `~/b/Dta/plug_into_socket_franka3_15hz_lerobot_4d_v30/` (转换后)

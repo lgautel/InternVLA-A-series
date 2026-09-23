@@ -51,6 +51,31 @@ from lerobot.utils.utils import (
     gather_object, 
 )
 
+def _find_image_transforms(dataset):
+    if hasattr(dataset, 'image_transforms') and dataset.image_transforms is not None:
+        return dataset.image_transforms
+    for attr in ('dataset', '_dataset', 'datasets'):
+        inner = getattr(dataset, attr, None)
+        if inner is None:
+            continue
+        if isinstance(inner, (list, tuple)):
+            for ds in inner:
+                tf = _find_image_transforms(ds)
+                if tf is not None:
+                    return tf
+        else:
+            tf = _find_image_transforms(inner)
+            if tf is not None:
+                return tf
+    return None
+
+
+def _update_augment_p_on_epoch(dataset, epoch_count):
+    tf = _find_image_transforms(dataset)
+    if tf is not None and hasattr(tf, 'update_p_on_epoch'):
+        tf.update_p_on_epoch(epoch_count)
+
+
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -337,6 +362,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("Start offline training on a fixed dataset")
         training_start_time = time.perf_counter()
 
+    _prev_p_epoch = -1
+
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
@@ -358,6 +385,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         # increment `step` here.
         step += 1
         train_tracker.step()
+
+        _cur_epoch = int(train_tracker.epochs)
+        if _cur_epoch != _prev_p_epoch:
+            _update_augment_p_on_epoch(dataset, _cur_epoch)
+            _prev_p_epoch = _cur_epoch
+
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
 
