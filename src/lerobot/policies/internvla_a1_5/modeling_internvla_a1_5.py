@@ -1065,6 +1065,9 @@ class InternVLAA15(nn.Module):
             self.post_init_keypoint_weights()
             if config.geopredict_checkpoint_path:
                 self.load_geopredict_keypoint_weights(config.geopredict_checkpoint_path)
+            if config.dtype == "bfloat16":
+                for m in [self.track_encoder, self.kpt_state_proj, self.keypoint_embedding]:
+                    m.to(dtype=torch.bfloat16)
 
         self.set_requires_grad()
         self._setup_wan_grad()

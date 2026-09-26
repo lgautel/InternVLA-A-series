@@ -1,0 +1,10 @@
+robot_type: franka_cubinbx
+action_mask_spec: [7, -1]
+feature_mapping:
+  observation.state:
+    - observation.state
+  action:
+    - action
+image_mapping:
+  observation.images.global: observation.images.image0
+  observation.images.wrist: observation.images.image1

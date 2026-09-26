@@ -145,6 +145,19 @@ class SharpnessJitter(Transform):
         return self._call_kernel(F.adjust_sharpness, inpt, sharpness_factor=sharpness_factor)
 
 
+class RandomBlackout(Transform):
+    """Replace image pixels with near-black random noise."""
+
+    def __init__(self, noise_scale: float = 0.01) -> None:
+        super().__init__()
+        self.noise_scale = noise_scale
+
+    def transform(self, inpt: Any, params: dict[str, Any]) -> Any:
+        if isinstance(inpt, torch.Tensor):
+            return torch.rand_like(inpt) * self.noise_scale
+        return inpt
+
+
 @dataclass
 class ImageTransformConfig:
     """
@@ -215,6 +228,11 @@ class ImageTransformsConfig:
                 type="RandomAffine",
                 kwargs={"degrees": (-5.0, 5.0), "translate": (0.05, 0.05)},
             ),
+            "blackout": ImageTransformConfig(
+                weight=0.0,
+                type="RandomBlackout",
+                kwargs={"noise_scale": 0.01},
+            ),
         }
     )
 
@@ -228,6 +246,8 @@ def make_transform_from_config(cfg: ImageTransformConfig):
         return SharpnessJitter(**cfg.kwargs)
     elif cfg.type == "RandomAffine":
         return v2.RandomAffine(**cfg.kwargs)
+    elif cfg.type == "RandomBlackout":
+        return RandomBlackout(**cfg.kwargs)
     else:
         raise ValueError(f"Transform '{cfg.type}' is not valid.")
 

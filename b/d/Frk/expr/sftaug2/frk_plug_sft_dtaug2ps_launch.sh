@@ -83,7 +83,7 @@ BIGMATRIX_MAX_RETRIES="${BIGMATRIX_MAX_RETRIES:-5}"
 # ── Image augmentation: full tfs dict with affine weight=0.2 ─────────────
 # draccus treats dict fields as atomic — `--dataset.image_transforms.tfs.affine.weight=0.2`
 # does NOT work. We must pass the complete tfs dict as a YAML string.
-TFS_CONFIG='{brightness: {weight: 1.0, type: ColorJitter, kwargs: {brightness: [0.8, 1.2]}}, contrast: {weight: 1.0, type: ColorJitter, kwargs: {contrast: [0.8, 1.2]}}, saturation: {weight: 1.0, type: ColorJitter, kwargs: {saturation: [0.5, 1.5]}}, hue: {weight: 1.0, type: ColorJitter, kwargs: {hue: [-0.05, 0.05]}}, sharpness: {weight: 1.0, type: SharpnessJitter, kwargs: {sharpness: [0.5, 1.5]}}, affine: {weight: 0.2, type: RandomAffine, kwargs: {degrees: [-5.0, 5.0], translate: [0.05, 0.05]}}}'
+TFS_CONFIG='{brightness: {weight: 1.0, type: ColorJitter, kwargs: {brightness: [0.8, 1.2]}}, contrast: {weight: 1.0, type: ColorJitter, kwargs: {contrast: [0.8, 1.2]}}, saturation: {weight: 1.0, type: ColorJitter, kwargs: {saturation: [0.5, 1.5]}}, hue: {weight: 1.0, type: ColorJitter, kwargs: {hue: [-0.05, 0.05]}}, sharpness: {weight: 1.0, type: SharpnessJitter, kwargs: {sharpness: [0.5, 1.5]}}, affine: {weight: 0.2, type: RandomAffine, kwargs: {degrees: [-5.0, 5.0], translate: [0.05, 0.05]}}, blackout: {weight: 1.0, type: RandomBlackout, kwargs: {noise_scale: 0.01}}}'
 
 # ── p-schedule configuration ─────────────────────────────────────────────
 P_SCHEDULE="${P_SCHEDULE:-[0.3, 0.4, 0.5, 0.6, 0.5, 0.4]}"

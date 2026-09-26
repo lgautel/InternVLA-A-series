@@ -271,7 +271,8 @@ class TrackEncoder(nn.Module):
 
         self.point_patch_embed = PointPatchEmbedding(patch_size=patch_size, in_dim=input_dim, embed_dim=embed_dim)
         self.cross_attention_block = CrossAttentionBlock(
-            query_dim, embed_dim, num_heads, ff_dim, dropout, max_seq_len=max_seq_len // patch_size
+            query_dim, embed_dim, num_heads, ff_dim, dropout,
+            max_seq_len=(max_seq_len + patch_size - 1) // patch_size,
         )
         self.linear_transform = nn.Sequential(
             nn.Linear(query_dim, ff_dim),
