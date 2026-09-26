@@ -1,0 +1,26 @@
+{
+    "autoUpdatesChannel": "latest",
+    "env": {
+      "ANTHROPIC_AUTH_TOKEN": "sk-d4ce5945033d6c262a22f113635e21a3ea4106f097a7ff344f4e2d10651fe18e",
+      "ANTHROPIC_API_KEY": "sk-d4ce5945033d6c262a22f113635e21a3ea4106f097a7ff344f4e2d10651fe18e",
+      "ANTHROPIC_BASE_URL": "https://newapi.524228.xyz",
+      "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1",
+      "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "claude-fable-5-1",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5-20251001",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "claude-haiku-4-5-20251001",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "claude-opus-5",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "claude-sonnet-5"
+    },
+    "model": "sonnet",
+    "permissions": {
+      "allow": [
+        "Write",
+        "Edit",
+        "Bash(git *)"
+      ]
+    },
+    "skipWorkflowUsageWarning": true,
+    "theme": "dark"
+  }
