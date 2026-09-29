@@ -628,48 +628,314 @@ $$\text{act\_attn}^{(l)} = \underbrace{\text{self\_component}^{(l)}}_{\text{act 
 > action_att_output = _run_attn(action_query, k_for_action, v_for_action, action_attn_mask)
 > ```
 >
-> 但有一个关键细节: 这三段 K **来自三个不同模型的独立权重**. `prefix_key` 是 VLM 的 `k_proj` 算的, `kpt_key` 是 kpt expert 的 `k_proj` 算的, `action_key` 是 action expert 的 `k_proj` 算的. 它们只是恰好共享相同的 `head_dim` (由 VLM config 继承), 所以能在 `dim=2` (序列长度维度) 上拼接. 这不同于标准 self-attention 中所有 K 由同一组权重计算.
+> 但有一个关键细节: 这三段 K **来自三个不同模型的独立权重**. `prefix_key` 是 VLM 的 `k_proj` 算的, `kpt_key` 是 kpt expert 的 `k_proj` 算的, `action_key` 是 action expert 的 `k_proj` 算的. 它们之所以能在 `dim=2` (序列长度维度) 上拼接, 是因为**三个模型的 `num_key_value_heads` 和 `head_dim` 被强制设为相同值** (代码在 [modeling.py L630-631](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L630) 和 [L663-664](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L663)):
 >
-> **完整数据流图**:
+> ```python
+> # L630-631: action expert 的 head 配置继承自 VLM
+> action_expert_config.num_attention_heads = vlm_text_config.num_attention_heads   # 8
+> action_expert_config.num_key_value_heads = vlm_text_config.num_key_value_heads   # 2
+>
+> # L663-664: keypoint expert 同理
+> keypoint_expert_config.num_attention_heads = vlm_text_config.num_attention_heads  # 8
+> keypoint_expert_config.num_key_value_heads = vlm_text_config.num_key_value_heads  # 2
+> ```
+>
+> 三个模型的核心配置差异:
+>
+> | 参数 | VLM (Qwen3.5-2B) | Action Expert | Keypoint Expert |
+> |---|---|---|---|
+> | `hidden_size` | **2048** | **1024** | **1024** |
+> | `intermediate_size` | **6144** | **3072** | **3072** |
+> | `num_attention_heads` ($n_h$) | 8 | 8 (继承) | 8 (继承) |
+> | `num_key_value_heads` ($n_{kv}$) | 2 | 2 (继承) | 2 (继承) |
+> | `head_dim` ($d$) | 256 | 256 (继承) | 256 (继承) |
+>
+> `hidden_size` 的不同只影响 Q/K/V projection 的**输入维度**, 不影响输出维度:
+>
+> | Projection | VLM `(in → out)` | Expert `(in → out)` | 输出维度公式 |
+> |---|---|---|---|
+> | `k_proj` | `Linear(2048, 512)` | `Linear(1024, 512)` | $n_{kv} \times d = 2 \times 256 = 512$ |
+> | `v_proj` | `Linear(2048, 512)` | `Linear(1024, 512)` | 同上 |
+> | `q_proj` | `Linear(2048, 4096)` | `Linear(1024, 4096)` | $n_h \times d \times 2 = 8 \times 256 \times 2$ ($\times 2$ 因 Q-gate) |
+> | `o_proj` | `Linear(2048, 2048)` | `Linear(2048, 1024)` | 输入 = $n_h \times d$, 输出 = `hidden_size` |
+>
+> #### Shape 在 `compute_layer_complete_3path` 中的变化全流程
+>
+> 以 Qwen3.5-2B 默认配置为例, 符号定义:
+>
+> | 符号 | 含义 | 默认值 | 来源 |
+> |---|---|---|---|
+> | $B$ | Batch size (一个 batch 中有多少条样本) | 训练时通常 32-128 | 数据加载器 |
+> | $P$ | VLM prefix 序列长度 (image tokens + text instruction tokens) | 可变, 上限 `max_prompt_length=650` | `embed_prefix` 输出 |
+> | $K$ | Keypoint expert suffix 序列长度 = $1 + 2J$ | 17 (当 $J=8$) | `embed_kpt_suffix` 输出 |
+> | $A$ | Action expert suffix 序列长度 = $N + C$ | 100 ($N=50, C=50$) | `embed_suffix` 输出 |
+> | $T$ | 全序列总长度 = $P + K + A$ | ≈ 767 | 三段拼接 |
+> | $J$ | Keypoint 关节数 | 8 | `num_keypoint_joints` |
+> | $N$ | Learnable foresight tokens 数量 | 50 | `num_learnable_tokens` |
+> | $C$ | Action chunk size (一次预测多少步 action) | 50 | `action_chunk_size` |
+> | $n_h$ | Query 注意力头数 (num_attention_heads) | 8 | VLM config, 强制继承 |
+> | $n_{kv}$ | Key/Value 注意力头数 (num_key_value_heads, GQA) | 2 | VLM config, 强制继承 |
+> | $d$ | 每个注意力头的维度 (head_dim) | 256 | VLM config, 强制继承 |
+> | $D$ | 模型隐藏层维度 (hidden_size) | VLM=2048, Expert=1024 | 各模型独立 |
+>
+> **Shape `[B, 2, P, 256]` 的四个维度分别表示:**
+>
+> | dim 下标 | 维度名称 | 含义 | 为什么是这个值 |
+> |---|---|---|---|
+> | `dim=0` | **Batch** ($B$) | 批次中的第几条样本 | 数据并行, 一个 batch 一起算 |
+> | `dim=1` | **KV Head** ($n_{kv}=2$) | 第几个 Key/Value 注意力头 | GQA: 2 个 KV head 被 8 个 Q head 共享 (每 4 个 Q head 共享 1 个 KV head). `k_proj` 输出 $n_{kv} \times d = 2 \times 256 = 512$, `.view` 后得到 dim=1 |
+> | `dim=2` | **Sequence** ($P$ / $K$ / $A$ / $T$) | 序列中的第几个 token 位置 | 这是 `torch.cat` 拼接和 `slice` 切分的维度. 不同 expert 的序列长度不同, 但拼接只发生在这个维度, 所以其他维度必须一致 |
+> | `dim=3` | **Head dim** ($d=256$) | 该 head 内的第几个特征分量 | 每个注意力头的特征向量长度. 注意力计算 $Q \cdot K^\top$ 就是在这个维度上做内积 |
+>
+> **对比 Q 的 shape `[B, 8, L, 256]`:**
+>
+> | dim 下标 | Q 的值 | K/V 的值 | 差异原因 |
+> |---|---|---|---|
+> | `dim=1` | $n_h = 8$ (Q head 数) | $n_{kv} = 2$ (KV head 数) | **GQA (Grouped-Query Attention)**: Q 有 8 个 head, K/V 只有 2 个 head. 计算注意力前, `_run_attn` 中通过 `repeat_kv(k, num_key_value_groups=4)` 将 K/V 从 `[B,2,L,256]` 复制扩展到 `[B,8,L,256]`, 使 Q 和 K 的 head 维度对齐 |
+>
+> **Gate 的 shape `[B, L, 2048]` 为什么是 2048?**
+>
+> Qwen3.5 的 Q-gate 机制: `q_proj` 输出 $n_h \times d \times 2 = 8 \times 256 \times 2 = 4096$, 前一半是 Q, 后一半是 gate. Gate 经 `reshape` 后为 `[B, L, n_h \times d]` = `[B, L, 2048]`, 与 attention output (也是 `[B, L, 2048]`) 逐元素相乘: `att_out * sigmoid(gate)`. 这 2048 = $n_h \times d$ 是**所有三个 model 相同的**, 尽管 VLM 和 expert 的 `hidden_size` 不同 (2048 vs 1024). Gate 作用在 attention 输出空间 ($n_h \times d$), 而非 hidden 空间 ($D$).
+>
+> **`o_proj` 的输入输出维度为什么不对称?**
+>
+> `o_proj` 将 attention 输出从 $n_h \times d = 2048$ 投影回各 model 自己的 `hidden_size`. VLM 的 `o_proj` 是 `Linear(2048, 2048)` (恰好相同), expert 的是 `Linear(2048, 1024)` (降维). 输出经残差连接加回 `hidden_states`, 所以必须与各 model 的 `hidden_size` 匹配.
+>
+> **Step 1: 独立计算 Q/K/V** ([modeling.py L422-443](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L422))
+>
+> 遍历三个 model, 各自用自己 layer 的 `q_proj`/`k_proj`/`v_proj`:
+>
+> ```python
+> for i, hidden_states in enumerate(inputs_embeds):     # i ∈ {0=VLM, 1=Kpt, 2=Action}
+>     layer = models[i].layers[layer_idx]               # 每个 model 的第 layer_idx 层
+>     hidden_states = layer.input_layernorm(hidden_states)  # [B, L_i, D_i]
+>     ...
+>     key_state = layer.self_attn.k_norm(
+>         layer.self_attn.k_proj(hidden_states)          # [B, L_i, D_i] → [B, L_i, n_kv*d=512]
+>             .view(hidden_shape)                        # → [B, L_i, n_kv=2, d=256]
+>     ).transpose(1, 2)                                  # → [B, n_kv=2, L_i, d=256]
+> ```
+>
+> | Model (i) | 输入 `hidden_states` | `k_proj` | `key_state` (转置后) |
+> |---|---|---|---|
+> | VLM (0) | `[B, P, 2048]` | `Linear(2048, 512)` | **`[B, 2, P, 256]`** |
+> | Kpt (1) | `[B, 17, 1024]` | `Linear(1024, 512)` | **`[B, 2, 17, 256]`** |
+> | Action (2) | `[B, 100, 1024]` | `Linear(1024, 512)` | **`[B, 2, 100, 256]`** |
+>
+> Q 和 gate 的 shape (用 action expert 举例):
+> ```
+> q_proj(hidden_states)     → [B, 100, 4096]           # n_h * d * 2 = 8*256*2
+> .view(B, 100, -1, d*2)    → [B, 100, 8, 512]
+> chunk(2, dim=-1)          → query[B,100,8,256], gate[B,100,8,256]
+> query.transpose(1,2)      → [B, 8, 100, 256]         # query_state
+> gate.reshape(B, 100, -1)  → [B, 100, 2048]           # n_h * d
+> ```
+>
+> **Step 2: 第一次拼接 — 联合 RoPE** ([modeling.py L445-459](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L445))
+>
+> ```python
+> joint_key = torch.cat(key_states, dim=2)    # cat on sequence dim
+> # [B,2,P,256] + [B,2,17,256] + [B,2,100,256] → [B, 2, P+17+100, 256] = [B, 2, T, 256]
+> ```
+>
+> | Tensor | Shape |
+> |---|---|
+> | `joint_query` | `[B, 8, T, 256]` |
+> | `joint_key` | `[B, 2, T, 256]` |
+> | `joint_value` | `[B, 2, T, 256]` |
+>
+> RoPE 后 shape 不变, 但 Q/K 的值被注入了统一位置空间中的位置编码.
+>
+> **Step 3: 拆回三段** ([modeling.py L461-477](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L461))
+>
+> ```python
+> kpt_end = prefix_len + kpt_len       # P + 17
+> prefix_key = joint_key[:, :, :P]             # [B, 2, P, 256]
+> kpt_key    = joint_key[:, :, P:P+17]         # [B, 2, 17, 256]
+> action_key = joint_key[:, :, P+17:]          # [B, 2, 100, 256]
+> ```
+>
+> **Step 4: 第二次拼接 — 按注意力规则重新组合** ([modeling.py L498-514](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L498))
+>
+> ```python
+> # L501: kpt expert 看 [VLM, Kpt]
+> k_for_kpt = torch.cat([prefix_key_for_kpt, kpt_key], dim=2)
+> # [B, 2, P, 256] + [B, 2, 17, 256] → [B, 2, P+17, 256]
+>
+> # L511: action expert 看 [VLM, Kpt, Action]
+> k_for_action = torch.cat([prefix_key_for_action, kpt_key_for_action, action_key], dim=2)
+> # [B, 2, P, 256] + [B, 2, 17, 256] + [B, 2, 100, 256] → [B, 2, P+17+100, 256] = [B, 2, T, 256]
+> ```
+>
+> **Step 5: 注意力计算** ([modeling.py L494-514](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L494))
+>
+> `_run_attn` 内部先通过 `repeat_kv` 将 K/V 从 $n_{kv}=2$ 头扩展到 $n_h=8$ 头 (GQA, groups=4), 然后做标准 scaled dot-product attention:
+>
+> | 路径 | Q shape | K shape | V shape | Output shape |
+> |---|---|---|---|---|
+> | VLM prefix | `[B, 8, P, 256]` | `[B, 2, P, 256]` | 同 K | `[B, P, 8, 256]` |
+> | Kpt expert | `[B, 8, 17, 256]` | `[B, 2, P+17, 256]` | 同 K | `[B, 17, 8, 256]` |
+> | **Action expert** | **`[B, 8, 100, 256]`** | **`[B, 2, T, 256]`** | 同 K | **`[B, 100, 8, 256]`** |
+>
+> Action expert 的注意力矩阵 shape (GQA expand 后): $Q \cdot K^\top$ = `[B, 8, 100, 256]` $\times$ `[B, 8, T, 256]`$^\top$ = `[B, 8, 100, T]`, 即 100 个 action token 对 T 个 key 的注意力权重.
+>
+> **Step 6: concat 回 → Q-gate → o_proj → residual** ([modeling.py L516-549](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L516))
+>
+> ```python
+> att_output = cat([prefix_att, kpt_att, action_att], dim=1)  # [B, T, 8, 256]
+> att_output = att_output.reshape(B, -1, n_h * d)             # [B, T, 2048]
+> gates_joint = cat(gates, dim=1)                              # [B, T, 2048]
+> ```
+>
+> 然后按 model 切片, 乘以 `sigmoid(gate)`, 过各自的 `o_proj`:
+>
+> | Model | att_out slice | $\times$ sigmoid(gate) | `o_proj` | 输出 | + residual |
+> |---|---|---|---|---|---|
+> | VLM | `[B, P, 2048]` | `[B, P, 2048]` | `Linear(2048, 2048)` | `[B, P, 2048]` | `[B, P, 2048]` |
+> | Kpt | `[B, 17, 2048]` | `[B, 17, 2048]` | `Linear(2048, 1024)` | `[B, 17, 1024]` | `[B, 17, 1024]` |
+> | Action | `[B, 100, 2048]` | `[B, 100, 2048]` | `Linear(2048, 1024)` | `[B, 100, 1024]` | `[B, 100, 1024]` |
+>
+> 注意 `o_proj` 的输入维度是 $n_h \times d = 2048$ (对所有三个 model 相同), 但输出维度等于各 model 的 `hidden_size` — VLM 输出 2048, expert 输出 1024.
+>
+> **完整数据流图 (带具体 shape)**:
 >
 > ```mermaid
 > flowchart TB
->     subgraph "Step 1: 独立计算 Q/K/V (L422-443)"
->         VLM_H["VLM hidden [B,L_p,D]"] -->|"VLM.k_proj"| VLM_K["prefix_key [B,H,L_p,d]"]
->         KPT_H["Kpt hidden [B,L_k,D]"] -->|"Kpt.k_proj"| KPT_K["kpt_key [B,H,L_k,d]"]
->         ACT_H["Act hidden [B,L_a,D]"] -->|"Act.k_proj"| ACT_K["action_key [B,H,L_a,d]"]
+>     subgraph "Step 1: 独立 Q/K/V (L422-443)"
+>         VLM_H["VLM hidden<br/>[B, P, 2048]"] -->|"VLM.k_proj<br/>Linear(2048,512)"| VLM_K["prefix_key<br/>[B, 2, P, 256]"]
+>         KPT_H["Kpt hidden<br/>[B, 17, 1024]"] -->|"Kpt.k_proj<br/>Linear(1024,512)"| KPT_K["kpt_key<br/>[B, 2, 17, 256]"]
+>         ACT_H["Act hidden<br/>[B, 100, 1024]"] -->|"Act.k_proj<br/>Linear(1024,512)"| ACT_K["action_key<br/>[B, 2, 100, 256]"]
 >     end
 >     subgraph "Step 2: 联合 RoPE (L445-459)"
->         VLM_K --> CAT1["torch.cat dim=2"]
+>         VLM_K --> CAT1["torch.cat dim=2<br/>[B, 2, T, 256]"]
 >         KPT_K --> CAT1
 >         ACT_K --> CAT1
->         CAT1 --> ROPE["apply_rotary_pos_emb"]
+>         CAT1 --> ROPE["apply_rotary_pos_emb<br/>(shape 不变)"]
 >     end
 >     subgraph "Step 3: 拆回三段 (L461-477)"
->         ROPE --> SPLIT["按 prefix_len, kpt_end 切分"]
->         SPLIT --> VK2["prefix_key"]
->         SPLIT --> KK2["kpt_key"]
->         SPLIT --> AK2["action_key"]
+>         ROPE --> SPLIT["slice by prefix_len, kpt_end"]
+>         SPLIT --> VK2["prefix_key<br/>[B, 2, P, 256]"]
+>         SPLIT --> KK2["kpt_key<br/>[B, 2, 17, 256]"]
+>         SPLIT --> AK2["action_key<br/>[B, 2, 100, 256]"]
 >     end
 >     subgraph "Step 4: 按规则重新拼接 (L498-514)"
->         VK2 -->|"(可能 .detach)"| CAT_KPT["k_for_kpt = cat[VLM_K, Kpt_K]"]
+>         VK2 -->|"(可能 .detach)"| CAT_KPT["k_for_kpt<br/>[B, 2, P+17, 256]"]
 >         KK2 --> CAT_KPT
->
->         VK2 -->|"(可能 .detach)"| CAT_ACT["k_for_action = cat[VLM_K, Kpt_K, Act_K]"]
+>         VK2 -->|"(可能 .detach)"| CAT_ACT["k_for_action<br/>[B, 2, T, 256]"]
 >         KK2 -->|"(可能 .detach)"| CAT_ACT
 >         AK2 --> CAT_ACT
 >     end
->     subgraph "Step 5: 注意力计算 (L496-514)"
->         VK2 --> SELF_ATT["prefix_att = Attn(Q_vlm, K_vlm, V_vlm)"]
->         CAT_KPT --> KPT_ATT["kpt_att = Attn(Q_kpt, k_for_kpt, v_for_kpt)"]
->         CAT_ACT --> ACT_ATT["act_att = Attn(Q_act, k_for_action, v_for_action)"]
+>     subgraph "Step 5: Attention (L494-514)"
+>         VK2 --> SELF_ATT["prefix_att<br/>Q[B,8,P,256]×K[B,2,P,256]<br/>→ [B,P,8,256]"]
+>         CAT_KPT --> KPT_ATT["kpt_att<br/>Q[B,8,17,256]×K[B,2,P+17,256]<br/>→ [B,17,8,256]"]
+>         CAT_ACT --> ACT_ATT["act_att<br/>Q[B,8,100,256]×K[B,2,T,256]<br/>→ [B,100,8,256]"]
 >     end
 >
 >     style CAT_ACT fill:#fff3e0
 >     style ACT_ATT fill:#fff3e0
 > ```
 >
+> #### 拼接的结构性前提: 为什么三段 K 能 cat 在一起
+>
+> `torch.cat(tensors, dim=2)` 要求除 `dim=2` 外所有维度相同. 三段 K 的 shape 都是 `[B, 2, ?, 256]` — `dim=0` (batch), `dim=1` ($n_{kv}$), `dim=3` ($d$) 完全一致, 只有 `dim=2` (序列长度) 不同. 这正是因为 action expert 和 kpt expert 的 `num_key_value_heads` 和 `head_dim` 被 [L630-631](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L630) 强制继承自 VLM. 如果某个 expert 的 $n_{kv}$ 或 $d$ 不同, 这里的 `torch.cat` 就会报错.
+>
 > **为什么不是简单的 self-attention?** 在标准 self-attention 中, Q/K/V 由同一组权重对同一段 hidden states 计算. 而这里 action expert 的注意力中, Q 来自 action expert 的 `q_proj`, 但 K/V 的前两段来自 VLM 和 kpt expert 的 `k_proj`/`v_proj`. 这在语义上更类似于 **cross-attention** (用 action expert 的 Q 查询 VLM/kpt 的 K/V), 只是在实现上通过拼接 + mask 统一成了一次 attention 调用, 而非分开计算 self-attention 和 cross-attention.
+>
+> #### Video/WAN 相关 token 的 K 在哪里?
+>
+> **WAN video 模型的 token 不参与上述三路 MoT 的 K/V 拼接**. WAN (视频生成模型) 是一个完全独立的 frozen DiT, 它与 MoT 的信息交换**不通过联合注意力**, 而是通过一个间接的 **"瓶颈投影"** 管道. 具体地:
+>
+> **Learnable tokens 是 action expert suffix 的一部分**, 其 K 已经包含在 `action_key` 中:
+>
+> `embed_suffix` ([modeling.py L1515-1573](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L1515)) 构建 action expert 的 suffix:
+>
+> $$\text{suffix} = [\underbrace{\text{state}(1)}_{\text{state\_proj}},\; \underbrace{\text{learnable\_tokens}(N=50)}_{\text{learnable\_tokens\_in\_proj}},\; \underbrace{\text{action\_time}(C=50)}_{\text{action\_time\_mlp}}]$$
+>
+> ```python
+> # L1536-1543: Learnable tokens — 嵌入到 suffix 中
+> lt_emb = self.learnable_tokens_in_proj(self.learnable_tokens)  # [50, 1024]
+> lt_emb = lt_emb[None].expand(bsize, -1, -1)                   # [B, 50, 1024]
+> embs.append(lt_emb)
+>
+> # L1554-1563: Action + time tokens
+> action_time_emb = ...                                          # [B, 50, 1024]
+> embs.append(action_time_emb)
+>
+> embs = torch.cat(embs, dim=1)  # [B, 1+50+50, 1024] = [B, 101, 1024]  (或 [B, 100, 1024] if tokenize_state)
+> ```
+>
+> 这个 `suffix_embs [B, 100, 1024]` 作为 `inputs_embeds[2]` (action expert 的输入) 进入 `compute_layer_complete_3path`. 在 Step 1 的循环中, action expert 的 layer 对它做 `k_proj`, 得到 `action_key [B, 2, 100, 256]`. **这 100 个位置中的第 1-50 个就是 learnable tokens 对应的 K** — 它们与 action/time tokens 的 K 混合在一起, 没有被单独拆分出来.
+>
+> **WAN DiT 的输入不是 K/V, 而是 learnable tokens 的 MoT 输出经投影后的 context**:
+>
+> 训练 forward 完成后 ([modeling.py L1954](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L1954)):
+>
+> ```python
+> # 从 action expert 的 suffix 输出中切出 learnable tokens 的部分
+> learnable_out = self.get_learnable_token_output(suffix_out)  # suffix_out[:, 1:1+50]
+> # → [B, 50, 1024]
+> ```
+>
+> `get_learnable_token_output` ([modeling.py L1637-1640](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L1637)):
+> ```python
+> def get_learnable_token_output(self, suffix_out):
+>     start = 1   # 跳过 state token
+>     end = 1 + self.config.num_learnable_tokens  # 1+50=51
+>     return suffix_out[:, start:end]             # [B, 50, 1024]
+> ```
+>
+> 然后投影到 WAN 的维度空间 ([modeling.py L2080](src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py#L2080)):
+> ```python
+> wan_context = self.learnable_to_wan_proj(learnable_out)  # Linear(1024, wan_dim) → [B, 50, wan_dim]
+> ```
+>
+> 最后在 `wan_dit_forward` 中, WAN DiT 的每个 block 做 cross-attention 时, 用 video patch tokens 作为 Q, `wan_context` 作为 K/V ([wan/modules/model.py L262-284](src/lerobot/policies/internvla_a1_5/wan/modules/model.py#L262)):
+>
+> ```python
+> class WanCrossAttention(WanSelfAttention):
+>     def forward(self, x, context, context_lens):
+>         # x: video patch tokens [B, L_video, C_wan]   ← Q 来源
+>         # context: wan_context  [B, 50, C_wan]         ← K/V 来源 (learnable tokens 投影)
+>         q = self.norm_q(self.q(x)).view(...)
+>         k = self.norm_k(self.k(context)).view(...)     # context 提供 K
+>         v = self.v(context).view(...)                   # context 提供 V
+>         x = flash_attention(q, k, v, ...)
+> ```
+>
+> **完整信息流总结**:
+>
+> ```mermaid
+> flowchart LR
+>     subgraph "三路 MoT (compute_layer_complete_3path, 36层)"
+>         VLM["VLM prefix<br/>[B, P, 2048]"]
+>         KPT["Kpt Expert<br/>[B, 17, 1024]"]
+>         ACT["Action Expert suffix<br/>[B, 100, 1024]<br/>含 learnable_tokens (位置1-50)"]
+>         VLM -->|"K/V 拼接"| KPT
+>         VLM -->|"K/V 拼接"| ACT
+>         KPT -->|"K/V 拼接"| ACT
+>     end
+>
+>     ACT -->|"suffix_out[:, 1:51]"| LT_OUT["learnable_out<br/>[B, 50, 1024]"]
+>     LT_OUT -->|"learnable_to_wan_proj<br/>Linear(1024, wan_dim)"| WAN_CTX["wan_context<br/>[B, 50, wan_dim]"]
+>
+>     subgraph "WAN DiT (frozen, 独立网络)"
+>         WAN_CTX -->|"cross-attn K/V"| WAN_BLOCK["WAN Block<br/>video patches → Q<br/>wan_context → K/V"]
+>     end
+>
+>     style ACT fill:#fff3e0
+>     style LT_OUT fill:#e1f5fe
+>     style WAN_CTX fill:#e1f5fe
+>     style WAN_BLOCK fill:#f3e5f5
+> ```
+>
+> 所以, **video 相关的信息流路径与三路 MoT 的 K/V 拼接是两个完全不同的阶段**:
+>
+> | 阶段 | 发生在 | 机制 | Video 参与? |
+> |---|---|---|---|
+> | 三路 MoT 联合注意力 | `compute_layer_complete_3path` 的每一层 | Q/K/V 拼接 + block-causal mask | **否** — WAN 不参与. Learnable tokens 的 K 混在 `action_key` 里, 但它们此时只是普通的 action expert tokens |
+> | VLM→Video 信息传递 | MoT forward 完成**之后** | Learnable tokens 输出 → 投影 → WAN cross-attention 的 K/V | **是** — 但这是 WAN DiT 自己的 cross-attention, 不是 MoT 的联合注意力 |
+>
+> Learnable tokens 的角色是 **"信息瓶颈"**: 在 MoT 中它们作为 action expert 的一部分 attend 到 VLM K/V (吸收视觉-语言信息), MoT 完成后它们的输出被投影为 WAN 的 cross-attention context (将信息传递给视频生成模型). 这种设计避免了在 36 层 MoT 中引入第四路 WAN path, 大幅减少了计算量.
 
 **这就是方案 D (Residual Mixing) 在 v1 中被标记为高风险的原因**: 拆分破坏了 softmax 跨越全部 K/V 的归一化语义.
 
