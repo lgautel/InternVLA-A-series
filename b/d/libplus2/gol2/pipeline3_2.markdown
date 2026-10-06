@@ -799,9 +799,15 @@ sequenceDiagram
 6. **全量日志打包** — 将 `/B/Log/${EXPR_NAME}/` 下的**所有**日志（warmup 训练日志、SFT 训练日志、评估日志、评估归档）统一打包到 `/home/a26113/b/Ckp/${EXPR_NAME}_ALL_LOGS_$(date +%Y%m%d_%H%M%S).tar.gz`，确保实验的完整记录持久保存在 checkpoint 目录中
 7. **GPU 占位** — 启动 `bigmatrix_multiply_optimization.py` 后台任务占用 GPU，防止空闲 GPU 被系统回收或被其他用户抢占
 
+#### Sensor Noise GPU 瓶颈与分片策略
+
+Sensor Noise 类别的任务因 CPU 密集型图像噪声滤镜（尤其是 `glass_blur` 的 O(H×W×iters) 纯 Python 逐像素循环，单次调用 ~672ms）导致每 episode 耗时约为非噪声任务的 2 倍。若使用 `SHARDS_PER_SUITE=8`（与 GPU 数相同），任务按 ID 连续分片，GPU 5 会集中承担所有 Sensor Noise 任务，成为瓶颈（耗时约为最快 GPU 的 2 倍）。
+
+**解决方案**: `SHARDS_PER_SUITE=64`（默认值），生成 64 个小分片（每片 ~40 tasks），round-robin 分配到 8 GPU。每 GPU 获得 8 个分散的小分片，自动混合快/慢类别，消除单 GPU 瓶颈。
+
 #### 评估挂起超时保护
 
-若评估因某些 GPU shard 挂起（如 Sensor Noise 类型的 CPU-bound 任务导致单 GPU 耗时远超其他 GPU），`eval_v2_wrapper.sh` 的 Phase 4 调用受 `set +e` 保护，无论评估是成功退出（exit 0）还是超时/异常退出（exit ≠ 0），Phase 5 的全部后处理步骤都会执行。如果评估进程挂起超过 30 分钟无进展（可通过 `EVAL_HANG_TIMEOUT` 环境变量配置，默认不启用），操作员应手动终止挂起的 worker 并触发 Phase 5 后处理：
+`eval_v2_wrapper.sh` 的 Phase 4 调用受 `set +e` 保护，无论评估是成功退出（exit 0）还是超时/异常退出（exit ≠ 0），Phase 5 的全部后处理步骤都会执行。如果评估进程挂起超过 30 分钟无进展（可通过 `EVAL_HANG_TIMEOUT` 环境变量配置，默认不启用），操作员应手动终止挂起的 worker 并触发 Phase 5 后处理：
 
 ```bash
 # 手动终止挂起的评估并触发后处理
@@ -984,14 +990,19 @@ ls "${REPLAY_DIR}/videos/libero_goal/"*failure*.mp4 2>/dev/null
 | `CLIENT_VENV` | `/B/VENV/libero_plus_client` | 仿真客户端 Python 环境 | ew:69 |
 | `LIBERO_HOME` | `/B/SRC/LIBERO-plus` | LIBERO 仿真根目录 | ew:67 |
 
-#### Smoke 模式覆盖
+#### 分片与步数限制
+
+| 配置项 | Smoke 值 | Full 值 | 取值理由 | 设置位置 |
+|--------|----------|---------|----------|----------|
+| `SHARDS_PER_SUITE` | `64` | `64` | 细粒度分片 + round-robin 分配，将 Sensor Noise 等 CPU 密集型任务均匀散布到所有 GPU，消除单 GPU 瓶颈（原 `8` 导致 GPU 5 耗时为最快 GPU 的 2 倍） | ew:72 |
+| `MAX_STEPS_OVERRIDE` | `150` | `150` | 每 episode 最多 150 步；相比默认 (~300+) 步可节省 ~50% 评估时间，同时保持各类别相对排序一致 | ew:73 |
+
+#### Smoke 模式额外覆盖
 
 | 配置项 | Smoke 值 | Full 值 | 设置位置 |
 |--------|----------|---------|----------|
-| `SHARDS_PER_SUITE` | `2` | (默认全量) | ew:73 |
-| `GPU_IDS` | `0,2` | (默认全部) | ew:74 |
-| `CATEGORIES` | `"Language Instructions"` | (全部类别) | ew:75 |
-| `MAX_STEPS_OVERRIDE` | `100` | (无覆盖) | ew:76 |
+| `GPU_IDS` | `0,2` | (默认全部) | ew:75 |
+| `CATEGORIES` | `"Language Instructions"` | (全部类别) | ew:76 |
 
 #### Preflight 校验项
 

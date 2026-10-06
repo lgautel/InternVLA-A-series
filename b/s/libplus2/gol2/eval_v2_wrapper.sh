@@ -69,10 +69,11 @@ SERVER_VENV="${SERVER_VENV:-/B/VENV/itnvla15rbt20}"
 CLIENT_VENV="${CLIENT_VENV:-/B/VENV/libero_plus_client}"
 export LIBERO_HOME SERVER_VENV CLIENT_VENV
 
+export SHARDS_PER_SUITE="${SHARDS_PER_SUITE:-64}"
+export MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-150}"
+
 if [ "${EVAL_MODE}" = "smoke" ]; then
-    export SHARDS_PER_SUITE="${SHARDS_PER_SUITE:-2}"
     export GPU_IDS="${GPU_IDS:-0,2}"
-    export MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-100}"
 fi
 
 CONTRACT="${GOAL4D_DATASET}/meta/goal_train_eval_contract.json"
