@@ -34,6 +34,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from contract import GOAL_MJCF, LIVE_EEF_TOL_M  # noqa: E402
+from contract_v2 import pack_state_v2  # noqa: E402
 from load_contract import load_goal_contract  # noqa: E402
 
 from evaluation.LIBERO2.keypoint_utils import _get_robot_qpos  # noqa: E402
@@ -71,10 +72,11 @@ class GoalLiberoModelClient(LiberoModelClient):
                 "the eval FK model is not the one the training data was checked against"
             )
 
+        kpt_hist_len = int(os.environ.get("KPT_HISTORY_MAX_LEN", contract["keypoint_history_max_len"]))
         wanted = {
             "mjcf_path": str(GOAL_MJCF),
             "kpt_r_pad": float(contract["r_pad"]),
-            "kpt_history_max_len": int(contract["keypoint_history_max_len"]),
+            "kpt_history_max_len": kpt_hist_len,
         }
         for key, value in wanted.items():
             if key in kwargs and kwargs[key] not in (None, value):
@@ -87,6 +89,23 @@ class GoalLiberoModelClient(LiberoModelClient):
         self.live_fk_max_err_m = 0.0
         self.live_fk_violations = 0
         self._live_tol = float(contract.get("live_eef_tol_m", LIVE_EEF_TOL_M))
+
+    # --- (v2) 14-dim state override ----------------------------------------
+    def _extract_state(self, obs: dict[str, Any]) -> np.ndarray:
+        if self.contract.get("schema") != "goal_train_eval_contract/2":
+            return super()._extract_state(obs)
+        joint = np.asarray(obs["robot0_joint_pos"], dtype=np.float32).reshape(-1)
+        eef_pos = np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(-1)
+        eef_quat = np.asarray(obs["robot0_eef_quat"], dtype=np.float32).reshape(-1)
+        fingers = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(-1)
+        if joint.shape != (7,) or eef_pos.shape != (3,) or eef_quat.shape != (4,) or fingers.shape != (2,):
+            raise ValueError(
+                f"v2 obs shapes joint={joint.shape} eef={eef_pos.shape} "
+                f"quat={eef_quat.shape} fingers={fingers.shape}"
+            )
+        from evaluation.LIBERO2.model2libero_interface import _quat2axisangle
+        axisangle = _quat2axisangle(eef_quat)
+        return pack_state_v2(joint, np.concatenate([eef_pos, axisangle]), fingers[0], fingers[1])
 
     # --- (2) history clock -------------------------------------------------
     def reset(self, task_description: str | None = None) -> None:

@@ -240,18 +240,18 @@ classDiagram
 
 ### 5.1 要生成的量（复述必要部分）
 
-一帧 \(\mathbf{k}_t\in\mathbb{R}^{56}\)，\(56=8\times7\)。第 \(i\) 个点 \((p_x,p_y,p_z,q_x,q_y,q_z,q_w)\)：位置已除以 \(R_{\mathrm{pad}}\)，四元数单位化、顺序 xyzw、强制 \(q_w\ge0\)（\(\mathbf{q}\) 与 \(-\mathbf{q}\) 是同一旋转，半球约束消掉二义性）。8 个点依次是 `link1..link7` 与 `gripper0_eef`。
+一帧 \($\mathbf{k}_t\in\mathbb{R}^{56}$\)，\($56=8\times7$\)。第 \(i\) 个点 \((p_x,p_y,p_z,q_x,q_y,q_z,q_w)\)：位置已除以 \($R_{\mathrm{pad}}$\)，四元数单位化、顺序 xyzw、强制 \($q_w\ge0$\)（\($\mathbf{q}$\) 与 \($-\mathbf{q}$\) 是同一旋转，半球约束消掉二义性）。8 个点依次是 `link1..link7` 与 `gripper0_eef`。
 
 \[
-R_{\mathrm{pad}}=\max_i\max\big(|m_i|,|M_i|\big)\cdot(1+\rho),\qquad \rho=0.15
+$$R_{\mathrm{pad}}=\max_i\max\big(|m_i|,|M_i|\big)\cdot(1+\rho),\qquad \rho=0.15$$
 \]
 
-\(m_i, M_i\)：全部帧、全部关键点在 Goal 世界系里第 \(i\) 轴（\(i\in\{x,y,z\}\)）的最小与最大位置，除以 \(R_{\mathrm{pad}}\) 之前；\(\rho\) 是边距。边距只乘一次。四元数不除。
+\($m_i, M_i$\)：全部帧、全部关键点在 Goal 世界系里第 \(i\) 轴（\($i\in\{x,y,z\}$\)）的最小与最大位置，除以 \($R_{\mathrm{pad}}$\) 之前；\($\rho$\) 是边距。边距只乘一次。四元数不除。
 
 Goal 世界系里机器人底座：
 
 \[
-\mathbf{b}_{\mathrm{table}}=(-0.66,\ 0,\ 0.912)\ \mathrm{m}
+$$\mathbf{b}_{\mathrm{table}}=(-0.66,\ 0,\ 0.912)\ \mathrm{m}$$
 \]
 
 来自 `mounted_panda.py::base_xpos_offset["table"]=(-0.16 - L/2, 0, 0)`，\(L=1.0\) m 是桌长，再加 robosuite 安装座抬高的 0.912 m。`gripper0_eef` 相对 `right_hand` 的固定变换是四元数 wxyz \((0.707107,0,0,-0.707107)\) 加沿其 \(z\) 轴 0.097 m。
@@ -495,6 +495,107 @@ bash /B/SRC/itvlaGpLibPlus/b/s/libplus2/gol/run_eval_goal_plus.sh
 
 - 先做**试点**：用 `CATEGORIES` 只跑一个类别的少量任务；
 - 验收判据：`failed_tasks` 为空，且客户端日志里 `GoalFKMismatch` 出现 0 次。有任何一次，说明该任务的机器人底座不在 \((-0.66,0,0.912)\)，成功率数字不可用。
+
+### 7.6 评估侧的边距、包围盒与 3D 关键点
+
+训练数据生成（§5）和评估推理对关键点的计算本质上相同，但输入来源和时机不同。下面对比说明。
+
+#### 7.6.1 边距（margin）与 \(R_{\mathrm{pad}}\)
+
+**训练侧**（§5.1–5.2）：\(R_{\mathrm{pad}}\) 在数据生成的 Pass 1 中从全量数据计算一次——扫描 512,604 帧 × 8 个关键点的 xyz 位置，取三个轴的全局极值，再乘以 \(1+\rho=1.15\)：
+
+\[
+R_{\mathrm{pad}}=\max_{i\in\{x,y,z\}}\max\big(|m_i|,|M_i|\big)\cdot 1.15 = 1.8212723272872922
+\]
+
+计算完成后写入 `meta/goal_train_eval_contract.json` 的 `r_pad` 字段和 `meta/keypoints_meta.json` 的 `bbox_radius` 字段。
+
+**评估侧**：**不重新计算边距，也不重建包围盒**。\(R_{\mathrm{pad}}\) 作为固定常数直接从契约文件读取，注入 `StandaloneFK`（[`goal_client.py:77`](../../s/libplus2/gol/goal_client.py)）：
+
+```python
+wanted = {
+    "kpt_r_pad": float(contract["r_pad"]),  # 1.8212723272872922
+    "mjcf_path": str(GOAL_MJCF),            # panda_goal_table.xml
+    ...
+}
+# → 传入 LiberoModelClient.__init__
+# → StandaloneFK(r_pad=kpt_r_pad, mjcf_path=...)
+```
+
+> **历史 bug B9（双重边距，13% 误差）**：旧评估管线 `keypoint_utils.py` 有一个硬编码 `DEFAULT_R_PAD = 1.8212722539901733`，该值本身已包含 15% 边距。如果代码在此基础上再乘 1.15，就会产生约 13% 的归一化误差。Goal 方案的解决方式是：用契约里的 \(R_{\mathrm{pad}}\) 原值，不再额外乘边距。
+
+#### 7.6.2 包围盒
+
+**训练侧**：包围盒在 Pass 1（[`generate_goal_4d.py:120–138`](../../s/libplus2/gol/generate_goal_4d.py)）中逐帧更新全局 min/max：
+
+```python
+gmin = np.full(3, np.inf)     # 三轴全局最小
+gmax = np.full(3, -np.inf)    # 三轴全局最大
+for ep in all_episodes:
+    pos = fk.batch_world(ep.qpos9())[:, :, :3]   # [T, 8, 3]
+    gmin = np.minimum(gmin, pos.reshape(-1, 3).min(axis=0))
+    gmax = np.maximum(gmax, pos.reshape(-1, 3).max(axis=0))
+r_pad = compute_r_pad(gmin, gmax, margin=0.15)
+```
+
+这是一个轴对齐的最小包围盒（AABB），包住全部关键点在 Goal 世界系 xyz 三个方向上的极值。其唯一产物就是 \(R_{\mathrm{pad}}\) 这个标量。
+
+**评估侧**：**不计算包围盒**。评估只需要归一化半径 \(R_{\mathrm{pad}}\)，该值从契约读取（见 7.6.1）。包围盒的中间量（`gmin`, `gmax`）在数据生成完成后不再保留，也不需要。
+
+#### 7.6.3 3D 关键点的实时计算
+
+**训练侧**：Pass 2 逐帧 FK → 位置除以 \(R_{\mathrm{pad}}\) → 四元数 wxyz→xyzw + 半球 → 存入 `observation.keypoint_3d`（flat `[56]`）。见 §5.1–5.2。
+
+**评估侧**：每个控制步从仿真环境读取当前 qpos，实时 FK 计算，使用**完全相同的归一化和四元数约定**。流程如下：
+
+```mermaid
+flowchart TB
+    ENV["仿真环境 qpos\n7 arm + 2 gripper"] --> FK
+    subgraph FK ["StandaloneFK.extract(qpos9)"]
+        MJ["mj_forward(panda_goal_table.xml)\nbase = (-0.66, 0, 0.912)"]
+        MJ --> POS["8 body 的 xpos"]
+        MJ --> QUAT["8 body 的 xquat (wxyz)"]
+        POS --> NORM["pos / R_pad"]
+        QUAT --> CONV["wxyz → xyzw, qw<0 则取反"]
+    end
+    FK --> KPT["归一化关键点 [8, 7]"]
+    KPT --> HIST["push → KeypointHistory\n(max_len=92, oldest-first, zero-pad)"]
+    HIST --> SRV["Server payload:\nkpt_history [92, 8, 7] + his_len"]
+```
+
+`StandaloneFK.extract`（[`keypoint_utils.py:90–111`](../../evaluation/LIBERO2/keypoint_utils.py)）的核心逻辑：
+
+```python
+def extract(self, qpos9):
+    self._data.qpos[:9] = qpos9[:9]
+    mujoco.mj_forward(self._model, self._data)
+    kpts = np.empty((8, 7), dtype=np.float32)
+    for i, bid in enumerate(self._body_ids):
+        kpts[i, :3] = self._data.xpos[bid] / self.r_pad   # 位置归一化
+        w, x, y, z = self._data.xquat[bid]                 # MuJoCo 返回 wxyz
+        xyzw = np.array([x, y, z, w], dtype=np.float32)    # 转成 xyzw
+        if xyzw[3] < 0:                                     # 半球约束
+            xyzw = -xyzw
+        kpts[i, 3:] = xyzw
+    return kpts
+```
+
+注意这里 `self._data.xpos[bid]` 已经是 Goal 世界系下的绝对位置——因为 `panda_goal_table.xml` 在 MJCF 中把机器人底座设为 `pos="-0.66 0 0.912"`，`mj_forward` 输出的 `xpos` 自动包含了底座偏移。
+
+与训练侧 `GoalTableFK.keypoints`（[`fk.py:139–148`](../../s/libplus2/gol/fk.py)）做同样的事，但有一处实现差异：训练侧 FK 先算 `world_poses`（不含底座）再手动加 `base_xpos`，评估侧 FK 靠 MJCF 里已经写死的底座位置让 `mj_forward` 直接输出正确坐标。两者等价，因为底座值相同且写入了契约。
+
+#### 7.6.4 训练 vs 评估一致性汇总
+
+| 维度 | 训练（离线，§5） | 评估（在线，§7） | 一致性保障 |
+|------|:-------------:|:-------------:|-----------|
+| MJCF 文件 | `panda_goal_table.xml` | 同一文件 | 契约存 MD5，启动时校验（§7.2 #2） |
+| 底座位置 | \((-0.66,\ 0,\ 0.912)\) | 同上 | Goal 专用 MJCF，**不是** Lift 的 \((-0.56,\ 0,\ 0.912)\) |
+| \(R_{\mathrm{pad}}\) | 全量扫描算出 | 直接读契约定值 | 不二次乘边距，避免 B9 |
+| 位置归一化 | `xyz / R_pad` | 同上 | — |
+| 四元数 | xyzw, \(q_w\ge 0\) | 同上 | 代码强制 |
+| 关键点 body | `link1..link7, gripper0_eef` | 同上 | 代码列表与 MJCF 一致 |
+| 历史长度 | 训练 `keypoint_history_max_len=92` | 评估 `max_len=92`（从 checkpoint config 读取） | wrapper 脚本注入，覆盖契约默认的 200 |
+| 首步活体校验 | 训练 Pass 1 的 `validate_episode`：FK eef vs `state[0:3]` ≤ 2 mm | `GoalLiberoModelClient`：FK eef × \(R_{\mathrm{pad}}\) vs `robot0_eef_pos` ≤ 5 mm | 都是 FK 与观测的独立交叉验证 |
 
 ---
 

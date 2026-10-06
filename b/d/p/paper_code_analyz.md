@@ -19,6 +19,8 @@
 11. [关键设计取舍与局限性讨论](#11-关键设计取舍与局限性讨论)
 12. [参考文献与引用来源汇总](#12-参考文献与引用来源汇总)
 13. [模型网络结构深度解析](#13-模型网络结构深度解析)
+14. [Video future horizon 与 action chunk 对齐（及世界模型—动作预测对齐）](#14-video-future-horizon-与-action-chunk-对齐及世界模型动作预测对齐)
+15. [3D Keypoint History / Future 与 Action Chunk 对齐（代码为准）](#15-3d-keypoint-history--future-与-action-chunk-对齐代码为准)
 
 ---
 
@@ -272,26 +274,26 @@ Qwen3.5 [qwen3.5] 采用了一种**混合注意力**（hybrid attention）设计
 #### 4.2.1 数学表述
 
 按论文 [Section 3.2](InternVLA-A1.5-paper.md) 的记号，设：
-- \(Q^f \in \mathbb{R}^{M \times d}\)：可学习 foresight token，\(M\) 为 token 数（默认 50），\(d\) 为 unified expert 的隐藏维度；
-- \(H_t\)：由 \((o_t, \ell, \hat\ell)\)（多视角观测、语言指令、预测的子任务描述）编码得到的视觉-语言隐藏状态；
-- \(\Phi_\theta\)：unified expert 的 transformer；
-- \(\mathcal{F}\)：foresight token 在联合序列中的位置索引。
+- \($Q^f \in \mathbb{R}^{M \times d}$\)：可学习 foresight token，\(M\) 为 token 数（默认 50），\(d\) 为 unified expert 的隐藏维度；
+- \(H_t\)：由 \($(o_t, \ell, \hat\ell)$\)（多视角观测、语言指令、预测的子任务描述）编码得到的视觉-语言隐藏状态；
+- \($\Phi_\theta$\)：unified expert 的 transformer；
+- \($\mathcal{F}$\)：foresight token 在联合序列中的位置索引。
 
 则上下文化后的 foresight embedding 为：
 
 \[
-Z_t^f = \Phi_\theta\big([H_t;\,Q^f]\big)_{\mathcal{F}} \tag{3}
+$$Z_t^f = \Phi_\theta\big([H_t;\,Q^f]\big)_{\mathcal{F}} \tag{3}$$
 \]
 
-再投影到 WAN 的条件空间：\(C_t^f = P_{\mathrm{WAN}}(Z_t^f)\)。
+再投影到 WAN 的条件空间：\($C_t^f = P_{\mathrm{WAN}}(Z_t^f)$\)。
 
-设 \(V_t \in \mathbb{R}^{(1+N)\times H_I\times W_I\times 3}\) 为"当前帧 + 未来 \(N\) 帧"拼接而成的视频片段（论文取 \(N=4\)），WAN-VAE 编码器把它压缩成干净的视频隐变量 \(x_1\)。训练时采样噪声隐变量 \(x_0\sim\mathcal{N}(0,I)\) 和插值时间步 \(s\in[0,1]\)，构造插值隐变量 \(x_s=(1-s)x_0+sx_1\)，目标速度 \(v_s=x_1-x_0\)，视频监督损失为：
+设 \($V_t \in \mathbb{R}^{(1+N)\times H_I\times W_I\times 3}$\) 为"当前帧 + 未来 \(N\) 帧"拼接而成的视频片段（论文取 \($N=4$\)），WAN-VAE 编码器把它压缩成干净的视频隐变量 \(x_1\)。训练时采样噪声隐变量 \($x_0\sim\mathcal{N}(0,I)$\) 和插值时间步 \($s\in[0,1]$\)，构造插值隐变量 \($x_s=(1-s)x_0+sx_1$\)，目标速度 \($v_s=x_1-x_0$\)，视频监督损失为：
 
 \[
-\mathcal{L}_{\mathrm{video}}=\mathbb{E}_{x_0,x_1,C_t^f,s}\left\|u(x_s,C_t^f,s)-v_s\right\|^2 \tag{4}
+$$\mathcal{L}_{\mathrm{video}}=\mathbb{E}_{x_0,x_1,C_t^f,s}\left\|u(x_s,C_t^f,s)-v_s\right\|^2 \tag{4}$$
 \]
 
-其中 \(u\) 是**冻结**的 WAN 去噪 transformer（DiT）。因为 WAN 参数不更新，\(\mathcal{L}_{\mathrm{video}}\) 的梯度只能沿着"条件通路"往回传：更新的对象是 foresight tokens \(Q^f\) 以及生成 \(C_t^f\) 的上游 unified expert 层，WAN 本身像一个"只读的裁判"。
+其中 \(u\) 是**冻结**的 WAN 去噪 transformer（DiT）。因为 WAN 参数不更新，\($\mathcal{L}_{\mathrm{video}}$\) 的梯度只能沿着"条件通路"往回传：更新的对象是 foresight tokens \($Q^f$\) 以及生成 \(C_t^f\) 的上游 unified expert 层，WAN 本身像一个"只读的裁判"。
 
 #### 4.2.2 代码实现：`embed_suffix` 中的三段式序列
 
@@ -2671,7 +2673,649 @@ $$\frac{\partial \mathcal{L}}{\partial W_{\text{in}}} = \frac{\partial \mathcal{
 
 *本报告基于仓库当前代码状态（`src/lerobot/policies/internvla_a1_5/` 等目录）与论文公开版本撰写，如后续代码/论文有更新，具体行号引用可能需要相应调整。*
 
+---
 
+## 14. Video future horizon 与 action chunk 对齐（及世界模型—动作预测对齐）
 
+> **阅读定位**：本节集中说明论文 Table 1 中「Action chunk 50 / Foresight tokens 50 / future observation 与 action chunk 对齐」在本地代码里**如何落地**；并解释口语中的「世界模型与动作预测对齐」在本仓库中具体指什么、**不**指什么。  
+> **交叉引用**：第 4.2 节已介绍 WAN 隐空间监督与 `ExtractVideoFramesTransformFn` 的数据形态；第 6 节涉及 dataset factory；更完整的 padding 统计见 [`itvla_trn_strategy.markdown`](itvla_trn_strategy.markdown) §24.2–§24.3。
+
+### 14.1 术语对照：论文说法 ↔ 代码对象
+
+| 论文 / 策略文档表述 | 代码中的主要对象 | 默认数值 |
+|---|---|---|
+| Action chunk \(H\) | `InternVLAA15Config.chunk_size`；`action_delta_indices` | 50 |
+| Foresight tokens \(M\) | `num_learnable_tokens`；`learnable_tokens` 参数 | 50 |
+| Video future horizon（未来观测时间窗） | `image_delta_indices` → 各相机 `delta_timestamps` / `delta_indices` | 右端点 = `chunk_size` |
+| Future 视频像素（当前帧 + \(N\) 帧未来） | `num_video_frames`；`observation.video_frames` 时间维 \(T=N+1\) | \(N=4\)，\(T=5\) |
+| 世界模型（训练期教师） | 冻结 `WanVideoModel`（VAE + DiT）；`loss_video` | 推理时 `action_loss_only=True` 可不加载 |
+| 动作预测 | Flow matching：`embed_suffix` 中 `chunk_size` 个 action+time token；`loss_action` | 与 `batch[ACTION]` 对齐 |
+
+论文 Table 1（见 [InternVLA-A1.5-paper.md](InternVLA-A1.5-paper.md) §3.4）同时列出 **Foresight tokens = 50** 与 **Action chunk = 50**，并写明 future frames 与 action chunk 共用规划 horizon。本地 [`itvla_trn_strategy.markdown`](itvla_trn_strategy.markdown) 第 316 行将同一句话概括为「video future horizon 与 action chunk 对齐」。
+
+**重要区分**：
+
+- **时间窗对齐**（本节核心）：future 图像采样与 action 监督是否覆盖**同一段以当前帧为起点的未来区间**——由 `chunk_size` 与 `LeRobotDataset` 的 delta 机制实现。
+- **结构并行**（论文 Table 1）：50 个 foresight token 与 50 个 action token **并列**于 suffix；代码**未** `assert num_learnable_tokens == chunk_size`，仅默认同为 50。
+- **因果对齐**（世界模型—动作）：action expert 通过 attention **读取** foresight 段输出；与 WAN 监督共用**同一 batch、同一锚点帧**下得到的 `learnable_out` 与 `video_frames`——见 §14.5。
+
+### 14.2 单一旋钮：`chunk_size` 生成两套 delta
+
+InternVLA-A1.5 不把「视频要看多远」和「动作要预测几步」拆成两个独立 horizon 超参（在默认配方下）。二者都派生自 **`chunk_size`**（默认 50）：
+
+```585:596:src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py
+    @property
+    def action_delta_indices(self) -> list:
+        return list(range(self.chunk_size))
+
+    @property
+    def image_delta_indices(self) -> list | None:
+        n = self.num_video_frames + 1
+        return [self.chunk_size * i // (n - 1) for i in range(n)]
+```
+
+记 \(H=\texttt{chunk_size}\)，\(K=\texttt{num\_video\_frames}+1\)（默认 \(K=5\)）。对数据集样本锚点帧索引 `idx`：
+
+- **Action chunk（稠密）**：偏移集合 \(\mathcal{D}_{\mathrm{act}} = \{0,1,\ldots,H-1\}\)，共 \(H\) 个向量，对应时刻 \(\mathrm{idx}+d\)。
+- **Future observation / 图像 delta（稀疏）**：偏移集合
+  \[
+  \mathcal{D}_{\mathrm{img}} = \left\{\left\lfloor \frac{H\cdot i}{K-1} \right\rfloor \;\middle|\; i=0,\ldots,K-1 \right\},
+  \]
+  默认 \(H=50\) 时为 \(\{0,12,25,37,50\}\)——**起点**为当前帧（\(d=0\)），**终点**为 \(\mathrm{idx}+H\)（\(d=50\)）。
+
+因此「video future horizon 与 action chunk 对齐」在代码里的**第一层含义**是：**future 视频采样的时间右界由 `chunk_size` 决定，与 action chunk 的规划长度 \(H\) 共用同一标量**；action 在 \([0,H-1]\) 上逐步监督，video 在 \([0,H]\) 上均匀取 \(K\) 个时间点（含右端点帧）。
+
+```mermaid
+flowchart LR
+  subgraph cfg["InternVLAA15Config"]
+    H["chunk_size = H"]
+  end
+  H --> DA["action_delta_indices<br/>0 … H−1"]
+  H --> DI["image_delta_indices<br/>0, …, H"]
+  DA --> DS["LeRobotDataset<br/>同一 idx 锚点"]
+  DI --> DS
+```
+
+修改 `--policy.chunk_size` 时，两套 delta **同步缩放**（例如 \(H=100\) 时图像偏移变为 `[0,25,50,75,100]`），无需单独改 video horizon。
+
+### 14.3 「图像 delta」是什么
+
+口语「图像 delta」**不是**名为 `image_delta` 的变量，而是 **`image_delta_indices` 中的每个整数**：相对当前样本帧 `idx`，向 future 偏多少**整帧**再去读相机 RGB。
+
+数据流命名链：
+
+| 阶段 | 变量名 | 说明 |
+|---|---|---|
+| Policy | `image_delta_indices` | 帧偏移列表，如 `[0,12,25,37,50]` |
+| 建数据集 | `delta_timestamps[camera_key]` | `[i/fps for i in image_delta_indices]` |
+| 数据集内部 | `delta_indices[camera_key]` | `round(秒 × fps)`，与 fps 网格对齐 |
+| 取数 | `query_indices[key]` | `[clamp(idx + delta)]`  per delta |
+| Transform 后 | `observation.video_frames` | `[T,C,H,W]`，\(T = K = \texttt{num\_video\_frames}+1\) |
+
+仅 **InternVLA-A1.5** 在 policy 配置中实现 `image_delta_indices`；基类 `PreTrainedConfig` 无此属性。建库时由 `resolve_delta_timestamps(cfg.policy, ds_meta)` 对每个 schema 相机键写入**同一套**图像 delta（与 action 键并列，均来自同一 `cfg.policy`）：
+
+```305:321:src/lerobot/datasets/factory.py
+    for key in ds_meta.features:
+        ...
+        elif key == ACTION and cfg.action_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
+        ...
+        if key in image_keys and hasattr(cfg, "image_delta_indices") and cfg.image_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.image_delta_indices]
+```
+
+训练入口在 `_build_single_dataset` 中调用：`delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)`（见同文件约 356 行）。
+
+### 14.4 执行对齐：`dataset[idx]` 一次取齐 action 与 future 图像
+
+`LeRobotDataset.__getitem__(idx)` 对所有注册了 delta 的 key，**共用同一个 `idx`**，按各自 delta 列表查询：
+
+```932:938:src/lerobot/datasets/lerobot_dataset.py
+        query_indices = {
+            key: [max(ep_start, min(ep_end - 1, idx + delta)) for delta in delta_idx]
+            for key, delta_idx in self.delta_indices.items()
+        }
+```
+
+- Parquet 中的 **`action`**：`_query_hf_dataset` 堆叠 \(H\) 行 → 形状 `[H, action_dim]`。
+- **视频键**：`_get_query_timestamps` + `_query_videos` 按 `query_indices` 解码 MP4 → 相机 tensor 为 `[T,C,H,W]`。
+
+Episode 越界时 clamp，并生成 `action_is_pad` / `observation.images.*_is_pad`（与 [`itvla_trn_strategy.markdown`](itvla_trn_strategy.markdown) §24 一致）。**细差**：action 最大偏移为 \(H-1\)，图像最大偏移为 \(H\)，故 episode 末尾 video 分支略更易触发 padding。
+
+Transform 管线中，`ExtractVideoFramesTransformFn`（默认在 `InternVLAA15DatasetConfig.data_transforms` 内注册）**不再改变时间**，只拆分用途：
+
+```652:678:src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py
+class ExtractVideoFramesTransformFn(DataTransformFn):
+    """Extract multi-frame video data for WAN and reduce camera keys to single frame for VLM.
+    When image_delta_indices produces [T, C, H, W] tensors per camera key,
+    ...
+    """
+    def __call__(self, data: DataDict) -> DataDict:
+        src = data[self.source_view]
+        if src.ndim == 4:  # [T, C, H, W]
+            video = src
+            if self.normalize_to_minus1_1:
+                video = video * 2.0 - 1.0
+            data[self.video_key] = video
+            for i in range(3):
+                k = f"{OBS_IMAGES}.image{i}"
+                if k in data and data[k].ndim == 4:
+                    data[k] = data[k][0]
+```
+
+- **Qwen VLM**：仅 \(t\) 时刻单帧（`[C,H,W]`）。
+- **WAN 监督**：`observation.video_frames`，覆盖 \(\mathcal{D}_{\mathrm{img}}\) 上的 future observation。
+
+VQA 样本无真实多帧时，`UnifyInternVLAA15InputsTransformFn` 填零 `observation.video_frames`；`InternVLAA15Policy.forward` 中 `video_mask = (vqa_type != 1)`，仅 robot 样本计入 `loss_video`。
+
+### 14.5 世界模型与动作预测对齐：模型内语义
+
+「世界模型与动作预测对齐」在本仓库中**不是**另建一个独立 world model 与 policy 逐步对齐的模块，而是以下三者在**同一训练步、同一 batch** 上的耦合：
+
+#### 14.5.1 同一 suffix 内的信息序（attention 对齐）
+
+Unified expert suffix：`[state(1)] [learnable(M)] [action+time(H)]`（见第 4.2.2 节）。Attention 为**组间因果、组内双向**：带噪 action token **可以 attend 到** foresight token 段与 VLM prefix，而 foresight 段**不能** attend 到 action 段——与论文 Figure 5 一致。因此，**动作预测所依赖的「未来摘要」**来自与 action chunk **同一次** expert 前向、同一上下文下的 \(Z_t^f\)，而非另一时间窗或另一 batch 独立编码。
+
+#### 14.5.2 同一 batch 上的 WAN 监督与 action FM（损失对齐）
+
+`InternVLAA15.forward` 中：
+
+- `actions = prepare_action(batch)` → 已由 \(\mathcal{D}_{\mathrm{act}}\) 堆好的 `[B, H, D]`；
+- `video_frames = batch["observation.video_frames"]` → 已由 \(\mathcal{D}_{\mathrm{img}}\) 堆好的 `[B, T, C, H, W]`；
+- 单次 `embed_suffix` → `suffix_out`；
+- `learnable_out = get_learnable_token_output(suffix_out)` → 投影为 WAN 条件，与**同一样本**的 `video_frames` 计算 `_compute_video_loss`；
+- `action_out = suffix_out[:, -chunk_size:]` → flow matching 的 `loss_action`。
+
+WAN（冻结 DiT）的梯度只回传到 foresight 条件通路与 unified expert；**不在模型内**再对 action 逐步与每一帧像素做显式配对——时间配对义务已在 §14.4 的 dataloader 完成。稀疏 5 帧 vs 稠密 50 步 action 是**同一 horizon 上的不同采样密度**；VAE 时间维另有压缩 `lat_T = 1 + num_video_frames // 4`（默认 \(T_{\mathrm{lat}}=2\)），不改变 \(\mathcal{D}_{\mathrm{img}}\) 在数据层的 horizon 定义。
+
+#### 14.5.3 默认长度 50 的三处「并行」（非强制绑定）
+
+| 机制 | 与 `chunk_size` 的关系 |
+|---|---|
+| `num_learnable_tokens` | 默认 50；与 \(M\) 对应，**代码未强制** `== chunk_size` |
+| `embed_suffix` 中 action+time 长度 | **等于** `chunk_size` |
+| FAST `time_horizon` | `FASTInternVLAA15ActionTokenizerTransformFn` 加载 tokenizer 时 `time_horizon = chunk_size` |
+
+GeoPredict 扩展（可选，`enable_keypoint_predictor=True`）：`keypoint_3d_delta_indices = range(-H, C+1)`，其中 \(H=\texttt{keypoint\_history\_max\_len}\)、\(C=\texttt{chunk\_size}\)，共 \(H+1+C\) 个偏移；`kpt_future` 张量时间维长度为 \(C\)，与 action chunk **共用同一 `chunk_size` 标量**，但相对锚点 `idx` 的帧偏移语义与 action 不同（见 [§15](#15-3d-keypoint-history--future-与-action-chunk-对齐代码为准)）。
+
+### 14.6 端到端序列图（训练一步）
+
+```mermaid
+sequenceDiagram
+  participant CFG as InternVLAA15Config.chunk_size
+  participant FAC as factory.resolve_delta_timestamps
+  participant DS as LeRobotDataset.__getitem__(idx)
+  participant TR as ExtractVideoFramesTransformFn
+  participant M as InternVLAA15.forward
+
+  CFG->>FAC: action_delta_indices / image_delta_indices
+  FAC->>DS: delta_indices[action], delta_indices[camera]
+  DS->>DS: idx + d_act → action[H,D]
+  DS->>DS: idx + d_img → images[T,C,H,W]
+  DS->>TR: video_frames + VLM 单帧
+  TR->>M: batch
+  M->>M: suffix: M foresight + H action tokens
+  M->>M: loss_action(actions), loss_video(video_frames, learnable_out)
+```
+
+### 14.7 与「仅 action 训练」模式的关系
+
+许多下游 warmup / 真机配方设 `action_loss_only=True`（或 `video_loss_weight=0`）：**不计算** `loss_video`，WAN 可不加载（优化后端要求 `action_loss_only=True`）。此时 dataloader **仍可**按 `image_delta_indices` 拉多帧（除非改 config），但**世界模型分支不参与梯度**——对齐机制仍在数据层存在，只是训练目标退化为纯 action（及 VQA / kpt 等）。
+
+### 14.8 实现检查清单（复现 / 改 horizon 时）
+
+1. **`--policy.chunk_size`**：同时改变 action 步数与 video 右端点；检查 episode 最短长度是否 \(\gg H\)（见策略文档 padding 图）。
+2. **`--policy.num_video_frames`**：只改变窗内**采样个数** \(K=N+1\)，不改变 horizon 右界（仍由 `chunk_size` 乘除公式决定）。
+3. **`--policy.num_learnable_tokens`**：若与 `chunk_size` 不一致，仅影响 foresight 段长度，**不**自动改变 dataloader 时间窗。
+4. **Transform 顺序**：须保留 `ExtractVideoFramesTransformFn`，且位于多帧 image 进入 VLM 单帧化之前（见 `InternVLAA15DatasetConfig.data_transforms` 默认顺序）。
+5. **混合 batch**：robot + VQA 时确认 `video_mask` 行为符合预期。
+
+### 14.9 小结
+
+| 问题 | 代码答案 |
+|---|---|
+| 「video future horizon 与 action chunk 对齐」在哪实现？ | `chunk_size` → `action_delta_indices` 与 `image_delta_indices`；`LeRobotDataset` 同一 `idx` 取数 |
+| 「图像 delta」是什么？ | `image_delta_indices` 的相对帧偏移；经 `delta_timestamps`/`delta_indices` 挂到各相机 key |
+| 「世界模型与动作预测对齐」是什么？ | 同 batch、同 expert 前向：foresight 输出既条件化 WAN（\( \mathcal{L}_{\mathrm{video}} \)），又被 action 段 attention 使用（\( \mathcal{L}_{\mathrm{action}} \)）；future 像素与 action 序列在数据层共用 **`chunk_size`** 定义的时间窗（关键点 future 的帧偏移语义见 [§15.5](#15-3d-keypoint-history--future-与-action-chunk-对齐代码为准)） |
+| 模型内是否逐步帧对齐？ | **否**；5 帧 video vs 50 步 action 为同 horizon 稀疏/稠密采样；WAN latent 时间维另做 VAE 压缩 |
+
+**出处**：论文 Table 1 与 §4.1 [InternVLA-A1.5-paper.md](InternVLA-A1.5-paper.md)；策略文档 [`itvla_trn_strategy.markdown`](itvla_trn_strategy.markdown) §4.1、§7.1、§24.2；实现 `src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py`、`src/lerobot/datasets/factory.py`、`src/lerobot/datasets/lerobot_dataset.py`、`src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py`、`src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py`。
+
+---
+
+## 15. 3D Keypoint History / Future 与 Action Chunk 对齐（代码为准）
+
+> **阅读定位**：本节以仓库当前源码为准，说明 GeoPredict 融合路径下 **3D 关键点历史轨迹**、**未来轨迹** 如何从数据进入 batch、如何在模型内编码与监督，以及如何与 **action chunk** 在时间上对齐。  
+> **交叉引用**：[§14](#14-video-future-horizon-与-action-chunk-对齐及世界模型动作预测对齐) 讨论 video / action / WAN 共用 `chunk_size` 的 horizon；本节讨论 **关键点** 的独立 delta 列表与 **+1 步** 语义差。  
+> **范围**：默认以 `enable_keypoint_predictor=True` 的 Phase 2（数据集含 `observation.keypoint_3d`）为主；Phase 1 与推理差异在 §15.8 单列。
+
+### 15.0 旧说法纠偏（相对过期设计文档 / 口头归纳）
+
+下列结论均以 `src/lerobot/policies/internvla_a1_5/`、`src/lerobot/datasets/`、`evaluation/LIBERO2/` 为准；**不要**把 `b/d/libplus*`、`pipeline3.markdown` 等实验日志里的超参（如 `H=92`、`kpt_future_loss_weight=2.0`）当作代码默认值——它们仅表示某次 launch 覆盖了 config。
+
+| 易错说法 | 代码事实 |
+|---|---|
+| History 有效长度必须被 4 整除 | **否**。`PointPatchEmbedding` 对非整除长度在末尾 **重复最后一帧** 再卷积；满历史取 4 的倍数只是减少尾 patch 伪帧的 **工程建议**（见 §15.3） |
+| Future 3D 轨迹在 transformer 里 **自回归** 逐步生成 | **否**。训练在一次 3-path forward 后，用 **J 个 query 隐状态 + C 个固定步长正弦嵌入 + 同一 `keypoint_out_proj`** 并行解码 `[B,C,J,dim]`（见 §15.4） |
+| `kpt_future[k]` 与 `action[k]` 对应 **同一仿真时刻** | **否**。同一锚点 `idx` 下：`action[k]`→`idx+k`，`kpt_future[k]`→`idx+k+1`，`kpt_t`→`idx`（见 §15.5） |
+| 默认 `keypoint_history_max_len=92` | **否**。Policy / Dataset config **默认 1000** |
+| 推理会输出 future 关键点轨迹 | **否**。`sample_actions` / `predict_action_chunk` **不**执行 `future_kpt_pred`；kpt 分支主要为 KV cache + 训练监督 |
+| `ki_kpt_gradient_scale` 已接入 forward | **否**。配置项存在，**forward 未读取**；硬隔离靠 `knowledge_insulation_kpt` / `kpt_to_action_detach` |
+| `keypoint_noise_sigma` 训练已生效 | **否**。仅存在于 config，forward **无引用** |
+| `inference_backend=optimized` 支持 `his_kpts` | **否**。optimized 后端无 kpt 路径；LIBERO eval 脚本要求 standard + `action_loss_only` |
+| 训练与 LIBERO 评测 history 长度必然相同 | **否**。训练由 `keypoint_history_max_len` 决定；`KeypointHistory` 默认 `max_len=200`（见 §15.8） |
+
+### 15.1 术语与配置旋钮
+
+| 符号 / 字段 | 含义 | 代码默认（InternVLAA15） |
+|---|---|---|
+| `idx` | `LeRobotDataset` 样本锚点帧（全局帧索引） | — |
+| \(H\) | `keypoint_history_max_len`：history **缓冲区**时间维上限 | 1000 |
+| \(C\) | `chunk_size`：action chunk 步数，亦 `kpt_future` 步数 | 50 |
+| \(J\) | `num_keypoint_joints` | 8（LIBERO 单臂 8 body；Aloha 等配方可改为 14） |
+| `dim` | `keypoint_track_input_dim` | 3（`kpt_4d_mode=pos_only`）或 7（`pos_rot`） |
+| Phase 1 | 数据集 **无** `observation.keypoint_3d` 列 | `kpt_mask=False`，重建 loss 为 0 |
+| Phase 2 | 数据集 **有** 离线 FK 写入的 `observation.keypoint_3d` | `kpt_mask=True`，参与 MSE |
+
+启用开关：`enable_keypoint_predictor`（Policy 与 `InternVLAA15DatasetConfig` 均需为 True 才会插入 `Extract3DKeypointTransformFn` 并请求 delta 列）。
+
+与 §14 的关系：
+
+- **共用**：\(C=\texttt{chunk\_size}\) 同时决定 `action_delta_indices` 长度与 `kpt_future` 的时间维长度。
+- **不共用**：关键点使用 **独立** 属性 `keypoint_3d_delta_indices`（`range(-H, C+1)`），与 `image_delta_indices`（稀疏 video 采样）无关。
+
+### 15.2 Ground truth：history / current / future 如何进入 batch
+
+#### 15.2.1 配置 → dataloader 时间窗
+
+当 `enable_keypoint_predictor=True` 时，policy 暴露：
+
+```598:617:src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py
+    def keypoint_3d_delta_indices(self) -> list[int] | None:
+        ...
+        if not self.enable_keypoint_predictor:
+            return None
+        h = self.keypoint_history_max_len
+        c = self.chunk_size
+        return list(range(-h, c + 1))  # H + 1 + C indices: [-H, ..., -1, 0, 1, ..., C]
+```
+
+`factory.resolve_delta_timestamps` 在数据集 **确实存在** `observation.keypoint_3d` 特征且上述 property 非空时，把整数偏移除以 `fps` 挂到该列：
+
+```314:318:src/lerobot/datasets/factory.py
+        elif key == "observation.keypoint_3d" and getattr(cfg, "keypoint_3d_delta_indices", None) is not None:
+            ...
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.keypoint_3d_delta_indices]
+```
+
+#### 15.2.2 同一 `idx` 上的索引与 clamp
+
+对每个 delta \(d\)，绝对帧索引为 `clamp(idx + d, ep_start, ep_end-1)`，越界处打 `observation.keypoint_3d_is_pad=True`：
+
+```932:945:src/lerobot/datasets/lerobot_dataset.py
+    def _get_query_indices(self, idx: int, ep_idx: int) -> tuple[dict[str, list[int | bool]]]:
+        ...
+        query_indices = {
+            key: [max(ep_start, min(ep_end - 1, idx + delta)) for delta in delta_idx]
+            ...
+        }
+        padding = {
+            f"{key}_is_pad": torch.BoolTensor(
+                [(idx + delta < ep_start) | (idx + delta >= ep_end) for delta in delta_idx]
+            )
+            ...
+        }
+```
+
+**GT 几何内容**来自 parquet 列 `observation.keypoint_3d`（离线 FK，非模型生成）。LIBERO 管线示例：训练数据 `util_scripts/generate_libero_keypoints.py`；评测 runtime `evaluation/LIBERO2/keypoint_utils.py` 中 `StandaloneFK` 与训练 Lift MJCF 对齐。
+
+#### 15.2.3 Transform 拆成五个字段
+
+`Extract3DKeypointTransformFn` 在 `NormalizeTransformFn` 之后、`ComposeFieldsTransform` 之前插入（关键点 **不参与** state/action 的 z-score）。堆叠张量 reshape 为 `[H+1+C, J, dim]` 后切片：
+
+```742:759:src/lerobot/policies/internvla_a1_5/transform_internvla_a1_5.py
+        hist_window = stacked[:h]
+        ...
+        his_len = h - num_invalid
+        his_kpts = torch.zeros(h, j, d, dtype=stacked.dtype)
+        if his_len > 0:
+            his_kpts[:his_len] = hist_window[num_invalid:]
+        ...
+        data["observation.kpt_t"] = stacked[h]
+        data["observation.kpt_future"] = stacked[h + 1 : h + 1 + c]
+        data["observation.kpt_mask"] = torch.tensor(True)
+```
+
+语义约定（与 GeoPredict `his_kpts[:n]=kpts` 一致）：
+
+- **`his_kpts`**：`[H, J, dim]`，**有效**历史帧按时间 **pack 在前**，后部零填；**不含**当前帧。
+- **`his_len`**：有效（非 `_is_pad`）历史帧个数，可 \(<H\)（episode 开头或 clamp）。
+- **`kpt_t`**：偏移 0，**当前帧**关键点。
+- **`kpt_future`**：`[C, J, dim]`，偏移 \(1\ldots C\) 的未来帧 GT。
+
+Phase 1：无 `observation.keypoint_3d` 键时，五字段零填且 `kpt_mask=False`。
+
+```mermaid
+flowchart LR
+  subgraph ds [LeRobotDataset idx]
+    D["keypoint_3d_delta_indices<br/>-H..0..C"]
+    Q["clamp + is_pad"]
+    R["stack keypoint_3d<br/>len H+1+C"]
+  end
+  subgraph tr [Extract3DKeypointTransformFn]
+    S["his_kpts + his_len"]
+    T["kpt_t"]
+    F["kpt_future C steps"]
+    M["kpt_mask"]
+  end
+  D --> Q --> R
+  R --> S
+  R --> T
+  R --> F
+  Q --> M
+```
+
+### 15.3 History 在模型内：TrackEncoder（非自回归）
+
+History **不**作为 \(H\) 个 token 进入 keypoint expert，而是先经 **TrackEncoder**（GeoPredict 移植）压成 **每个 joint 一个** token：
+
+```1575:1617:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def embed_kpt_suffix(self, state, his_kpts=None, his_len=None):
+        """Build the keypoint-expert suffix: ``[state(1)] [history-track(J)] [query(J)]``.
+        ...
+        hist_kpt_emb = self._apply_checkpoint(
+            lambda p, ln: self.track_encoder(p, ln), his_kpts, his_len
+        )
+        embs.append(hist_kpt_emb.to(dtype))
+        ...
+        query_kpt_emb = self.keypoint_embedding.weight[None].expand(bsize, -1, -1).to(dtype)
+        embs.append(query_kpt_emb)
+```
+
+TrackEncoder 时间 patch：`Conv1d(kernel=stride=patch_size)`，默认 `keypoint_track_patch_size=4`：
+
+```79:104:src/lerobot/policies/internvla_a1_5/keypoints.py
+            actual_len = lengths[i].item()
+            actual_len = max(actual_len, 1)
+            batch_points = points[i, :actual_len]
+            if actual_len % patch_size != 0:
+                pad_len = patch_size - (actual_len % patch_size)
+                padding = batch_points[-1:].repeat(pad_len, 1, 1)
+                batch_points = torch.cat([batch_points, padding], dim=0)
+            ...
+        patch_lengths = lengths // patch_size
+```
+
+**关于「被 4 整除」**：实现 **允许** 任意 `his_len`；非整除时末 patch 含重复末帧。`TimeEmbedding` 表长按 \(\lceil H/4\rceil\) patch 分配：`(max_seq_len + patch_size - 1) // patch_size`（`keypoints.py` L272–275）。满窗口且 `his_len=H` 时，令 \(H\bmod 4=0\) 可避免尾 patch 伪帧——Libplus 等实验常把 \(H\) 设为 92，但 **代码默认仍是 1000**。
+
+`his_len=0`（Phase 1）时 `max(actual_len,1)` 仍产生 1 个 patch（见 `tests/test_step1_track_encoder.py::test_zero_length_history_does_not_crash`）。
+
+### 15.4 Future：GT 来源 vs 模型预测（并行 head，非 AR）
+
+#### 15.4.1 GT
+
+即 §15.2 的 `observation.kpt_future`，**不由** policy forward 生成。
+
+#### 15.4.2 模型预测（仅训练 forward）
+
+Keypoint suffix 在序列中只有 **`1 + 2J`** 个 token（state + J 历史 + J query），**没有** \(C\times J\) 个 future token。一次 3-path MoT forward 后，取 **最后 J 个** query 位置输出：
+
+```1965:1986:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        if use_kpt:
+            kpt_query_out = self.get_keypoint_token_output(kpt_out).to(dtype=torch.float32)  # [B, J, D]
+            pred_kpt_current = self.keypoint_out_proj(kpt_query_out)  # [B, J, kpt_dim]
+            ...
+            future_kpt_tokens = kpt_query_out.unsqueeze(1) + future_pos[None, :, None, :]  # [B, C, J, D]
+            future_kpt_pred = self.keypoint_out_proj(
+                future_kpt_tokens.reshape(B * chunk_size, j, -1)
+            ).reshape(B, chunk_size, j, kpt_dim)
+            ...
+            loss_kpt_future = self._kpt_split_loss(future_kpt_pred, kpt_future, reduce_dims=(-1, -2, -3))
+```
+
+步长嵌入在 init 时注册（索引 \(0\ldots C-1\)，注释对应 GeoPredict `future_pos`）：
+
+```1020:1027:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+            self.keypoint_out_proj = nn.Linear(kpt_hidden_size, config.keypoint_track_input_dim)
+            future_kpt_pos_embed = get_1d_sincos_pos_embed(
+                kpt_hidden_size, torch.arange(config.chunk_size, dtype=torch.float32), base=100
+            )
+            self.register_buffer("future_kpt_pos_embed", future_kpt_pos_embed)
+```
+
+记 \(\mathbf{h}^{\mathrm{q}}_{b,j}\) 为 query 输出，\(\mathrm{PE}(c)\) 为 `future_kpt_pos_embed[c]`，\(\mathrm{Proj}\) 为 `keypoint_out_proj`，则对 \(c=0,\ldots,C-1\)：
+
+\[
+\hat{\mathbf{K}}^{\mathrm{cur}}_{b,j} = \mathrm{Proj}(\mathbf{h}^{\mathrm{q}}_{b,j}), \quad
+\hat{\mathbf{K}}^{\mathrm{fut}}_{b,c,j} = \mathrm{Proj}(\mathbf{h}^{\mathrm{q}}_{b,j} + \mathrm{PE}(c)).
+\]
+
+**各 future 步之间无 \(\hat{\mathbf{K}}^{\mathrm{fut}}_{c-1}\rightarrow\) 下一步输入 的依赖**，故 **不是** 自回归 trajectory decoder；与 action 的 flow matching（对 **噪声动作** 迭代）也是不同机制。
+
+```mermaid
+flowchart TB
+  subgraph once [单次 MoT forward]
+    IN["prefix + kpt_suffix 1+2J + action_suffix"]
+    OUT["kpt_out"]
+    Q["kpt_query_out B,J,D"]
+  end
+  IN --> OUT --> Q
+  Q --> CUR["Proj h_q -> pred current"]
+  Q --> FUT["For c in 0..C-1 parallel:<br/>Proj h_q + PE c"]
+  CUR --> Lcur["loss_kpt_current"]
+  FUT --> Lfut["loss_kpt_future"]
+```
+
+### 15.5 与 action chunk 的时间对齐
+
+#### 15.5.1 同一锚点、两套 delta
+
+Action 与关键点在 **同一个** `idx` 上取样，但偏移集合不同：
+
+```585:587:src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py
+    def action_delta_indices(self) -> list:
+        return list(range(self.chunk_size))
+```
+
+| 监督对象 | 相对偏移 \(d\) | 绝对帧（无 clamp 时） | 张量下标 |
+|---|---|---|---|
+| `action[k]` | \(k\)，\(k=0\ldots C-1\) | `idx + k` | `action[k]` |
+| `kpt_t` | \(0\) | `idx` | — |
+| `kpt_future[k]` | \(k+1\) | `idx + k + 1` | `kpt_future[k]` |
+| `his_kpts` 最后一格有效历史 | \(-1\) | `idx - 1` | `his_kpts[his_len-1]` |
+
+因此：**action chunk 描述从当前帧起未来 \(C\) 步的控制；future 关键点描述从下一帧起未来 \(C\) 帧的几何。** 二者 horizon 长度同为 \(C\)，但在时间轴上 **错开 1 个控制步**。这不是实现 bug，而是 `keypoint_3d_delta_indices` 中 history 严格不含当前帧（`[-H,-1]`）、当前帧单独为 `kpt_t`、future 从 `+1` 起的直接后果。
+
+#### 15.5.2 小算例（\(H=3, C=4\)）
+
+锚点 `idx=10`，episode 足够长、无 pad：
+
+| 偏移 \(d\) | 绝对帧 | 进入字段 |
+|---:|---:|---|
+| \(-3\) | 7 | `his_kpts[0]` |
+| \(-2\) | 8 | `his_kpts[1]` |
+| \(-1\) | 9 | `his_kpts[2]`，`his_len=3` |
+| \(0\) | 10 | `kpt_t` |
+| \(1\) | 11 | `kpt_future[0]` |
+| \(2\) | 12 | `kpt_future[1]` |
+| \(3\) | 13 | `kpt_future[2]` |
+| \(4\) | 14 | `kpt_future[3]` |
+
+同一 batch 中 `action[0]` 监督帧 10 的动作，而 `kpt_future[0]` 监督帧 11 的关键点——对比时需带上 **+1 偏移**。
+
+```mermaid
+flowchart LR
+  subgraph frames [绝对帧 idx=10 算例]
+    F7["7 his[0]"]
+    F8["8 his[1]"]
+    F9["9 his[2]"]
+    F10["10 kpt_t / action0"]
+    F11["11 kpt_fut0"]
+    F12["12 kpt_fut1 / action2"]
+    F13["13 kpt_fut2"]
+    F14["14 kpt_fut3"]
+  end
+  F7 --> F8 --> F9 --> F10 --> F11 --> F12 --> F13 --> F14
+```
+
+说明：`action[1]` 在帧 11，与 `kpt_future[0]` 同帧；`action[0]` 在帧 10，与 `kpt_t` 同帧，但 **不与** `kpt_future[0]` 同帧。
+
+#### 15.5.3 改 config 的联动
+
+- `--policy.chunk_size`：同时改变 `action` 堆叠长度、`kpt_future` 长度、`future_kpt_pos_embed` 长度（须与 checkpoint 一致）、以及 §14 的 video 右端点。
+- `--policy.keypoint_history_max_len`：只改变 history 窗口与 TrackEncoder 位置表上界，**不**改变 action 步数。
+
+### 15.6 训练 forward 与 loss 聚合
+
+#### 15.6.1 三路联合前向
+
+启用 kpt 时，序列拼接为 `[VLM prefix | kpt suffix | action suffix]`，**一次** forward（可 gradient checkpoint）：
+
+```1817:1899:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        if use_kpt:
+            pad_masks = torch.cat([prefix_pad_masks, kpt_pad_masks, suffix_pad_masks], dim=1)
+            ...
+            (prefix_out, kpt_out, suffix_out), _ = self.qwen3_5_with_expert.forward(
+                ...
+                inputs_embeds=[prefix_embs, kpt_embs, suffix_embs],
+                ...
+                knowledge_insulation_kpt=self.config.knowledge_insulation_kpt,
+                kpt_to_action_detach=self.config.kpt_to_action_detach,
+            )
+```
+
+同一步内还计算 flow matching 的 `loss_action`、可选 `loss_video` / VQA（与 §14 相同）。
+
+#### 15.6.2 关键点 MSE 与 pos_rot
+
+```1997:2005:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def _kpt_split_loss(self, pred: torch.Tensor, gt: torch.Tensor, reduce_dims: tuple[int, ...]) -> torch.Tensor:
+        ...
+        if self.config.kpt_4d_mode == "pos_rot":
+            loss_pos = F.mse_loss(pred[..., :3], gt[..., :3], reduction="none").mean(dim=reduce_dims)
+            pred_rot = F.normalize(pred[..., 3:kpt_dim], p=2, dim=-1)
+            loss_rot = F.mse_loss(pred_rot, gt[..., 3:kpt_dim], reduction="none").mean(dim=reduce_dims)
+            return loss_pos + self.config.kpt_rot_loss_weight * loss_rot
+        return F.mse_loss(pred, gt, reduction="none").mean(dim=reduce_dims)
+```
+
+`InternVLAA15.forward` 层对 batch 做 **`kpt_mask`** 过滤（Phase 2 才有 GT），再合成标量 loss：
+
+```2489:2524:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        if self.config.enable_keypoint_predictor:
+            kpt_mask = batch.get("observation.kpt_mask")
+            if kpt_mask is not None and kpt_mask.any():
+                loss_kpt_cur = loss_kpt_current[kpt_mask].mean()
+                loss_kpt_fut = loss_kpt_future[kpt_mask].mean()
+            else:
+                loss_kpt_cur = zero
+                loss_kpt_fut = zero
+            loss_kpt = self.config.kpt_loss_weight * (
+                loss_kpt_cur + self.config.kpt_future_loss_weight * loss_kpt_fut
+            )
+        ...
+            loss = (
+                self.config.action_loss_weight * loss_fm_action
+                + self.config.lambda_vqa * loss_vlm
+                + self.config.video_loss_weight * video_loss
+                + loss_kpt
+            )
+```
+
+默认权重：`kpt_loss_weight=1.0`，`kpt_future_loss_weight=1.0`（相对 **current 项** 的 future 权重）；`action_loss_weight=10.0`。实验脚本可覆盖，以 launch 为准。
+
+Phase 1：`loss_kpt_*` 为 0，但注释说明 kpt expert 仍可能通过 **action expert 对 kpt K/V 的 attention** 获得间接梯度。
+
+### 15.7 Backward 与梯度路由
+
+#### 15.7.1 Knowledge insulation（已实现）
+
+在 3-path attention 中（`modeling_internvla_a1_5.py` 约 L499–510）：
+
+- `knowledge_insulation_kpt=True`：kpt expert 读 prefix 时对 K/V **detach**，阻断 \(\mathcal{L}_{\mathrm{kpt}}\rightarrow\) VLM。
+- `kpt_to_action_detach=True`：action expert 读 kpt 段时对 K/V **detach**，阻断 \(\mathcal{L}_{\mathrm{action}}\rightarrow\) kpt expert。
+
+配置中的 `ki_gradient_scale` / `ki_kpt_gradient_scale`（soft KI）**尚未**在 forward 中接线。
+
+#### 15.7.2 冻结与分组学习率
+
+`freeze_keypoint_modules=True` 时冻结 TrackEncoder、kpt expert、`kpt_state_proj`、`keypoint_embedding`、`keypoint_out_proj`（L1125–1138）。
+
+`get_optim_params` 在启用 kpt 且 LR scale 非全 1 时，将 track_encoder / kpt 头 / kpt_expert / action_expert / VLM 分到不同 param group（L2218–2268）。
+
+#### 15.7.3 梯度路径示意
+
+```mermaid
+flowchart TB
+  lossTotal["loss"]
+  lossAct["loss_action"]
+  lossKpt["loss_kpt_cur + gamma*loss_kpt_fut"]
+  vlm["VLM"]
+  kptExp["keypoint_expert + Proj + TrackEncoder"]
+  actExp["action_expert"]
+  lossTotal --> lossAct
+  lossTotal --> lossKpt
+  lossAct --> actExp
+  lossAct --> vlm
+  lossKpt --> kptExp
+  actExp -->|"attend kpt unless kpt_to_action_detach"| kptExp
+  kptExp -->|"attend prefix unless knowledge_insulation_kpt"| vlm
+```
+
+`keypoint_out_proj` 在 loss 路径上显式用 float32 计算（与 bfloat16 主干共存）；TrackEncoder 等与 kpt 相关的模块在 `__init__` 中会 cast 到 bfloat16 以匹配 expert（见 modeling 注释与 warmup LOG）。
+
+### 15.8 推理与评测：history 如何供给、future 是否输出
+
+#### 15.8.1 标准推理
+
+```2298:2309:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        kpt_kwargs = {}
+        if self.config.enable_keypoint_predictor:
+            kpt_kwargs = {
+                "his_kpts": batch.get("observation.his_kpts"),
+                "his_len": batch.get("observation.his_len"),
+            }
+        actions = self.model.sample_actions(..., **kpt_kwargs)
+```
+
+`sample_actions` 在每个 env step **只跑一次** kpt expert 以扩展 `past_key_values`；flow matching 循环 **只**更新动作噪声，**不**计算 `future_kpt_pred`（L1338–1410 注释）。
+
+#### 15.8.2 LIBERO2 评测侧 history
+
+评测在 `env.step` **之前** `push_keypoint()`，使 runtime buffer 语义对齐训练「history 为严格过去帧、`kpt_t` 为当前帧」：
+
+```117:119:evaluation/LIBERO2/eval_libero_std.py
+            # Push the *current* obs into history *before* env.step so his_kpts
+            # matches training: Extract3DKeypointTransformFn keeps offsets
+            # [-H, ..., -1] in his_kpts and the current frame in kpt_t.
+```
+
+`KeypointHistory` 默认 `max_len=200`（`evaluation/LIBERO2/keypoint_utils.py` L137），与训练默认 `H=1000` **可不一致**——部署时应显式对齐 client buffer 与 `--policy.keypoint_history_max_len`（及 TrackEncoder 预训练时使用的 \(H\)）。
+
+#### 15.8.3 Optimized 后端
+
+`modeling_internvla_a1_5_optimized.py` **无** keypoint 路径；eval shell 注明 optimized **不接受** `his_kpts`。GeoPredict 融合 checkpoint 需 **standard** backend + 客户端持续上传 history。
+
+### 15.9 FAQ 与实现检查清单
+
+| 问题 | 代码答案 |
+|---|---|
+| History 必须被 4 整除吗？ | **否**；TrackEncoder 会自动 padding |
+| Future 是自回归吗？ | **否**；`h_q + PE(c)` 并行 Proj |
+| 推理输出 future kpt 吗？ | **否** |
+| 与 `action[k]` 同时刻吗？ | **否**；`kpt_future[k]` 对应 `idx+k+1` |
+| 与 §14 video 对齐方式相同吗？ | **部分**；共用 \(C\)，但 kpt 用独立 delta 列表，且无稀疏采样 |
+
+**改 horizon / 开 kpt 时建议检查：**
+
+1. `enable_keypoint_predictor` 与数据集是否含 `observation.keypoint_3d`（Phase 2）。
+2. `--policy.chunk_size` 与 checkpoint 的 `future_kpt_pos_embed`、action head 一致。
+3. `--policy.keypoint_history_max_len` 与 TrackEncoder / 评测 `KeypointHistory.max_len` 一致。
+4. `InternVLAA15DatasetConfig` 已插入 `Extract3DKeypointTransformFn`（L115–131）。
+5. `factory.resolve_delta_timestamps` 是否为 keypoint 列生成 delta（L314–318）。
+6. 推理：`inference_backend=standard`，batch 带 `observation.his_kpts` / `his_len`。
+7. 与 §14 联调：video 右端点仍为 `chunk_size`；kpt future 长度同为 `chunk_size`，但 **帧偏移 +1**。
+
+**出处（本节）**：`src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py`、`transform_internvla_a1_5.py`、`keypoints.py`、`modeling_internvla_a1_5.py`；`src/lerobot/datasets/factory.py`、`lerobot_dataset.py`；`evaluation/LIBERO2/eval_libero_std.py`、`keypoint_utils.py`；单测 `tests/test_step1_track_encoder.py`、`tests/test_step5_forward_loss.py`。
 
 

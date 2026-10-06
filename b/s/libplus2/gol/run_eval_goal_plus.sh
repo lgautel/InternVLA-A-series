@@ -28,15 +28,23 @@ CONTRACT="${GOAL4D_DATASET}/meta/goal_train_eval_contract.json"
 [ -f "${CONTRACT}" ] || { echo "FATAL: ${CONTRACT} missing"; exit 2; }
 [ -f "${ORIG}" ] || { echo "FATAL: ${ORIG} missing"; exit 2; }
 
+CONTRACT_SCHEMA=$(python3 -c "import json; print(json.load(open('${CONTRACT}'))['schema'])")
+if [ "${CONTRACT_SCHEMA}" = "goal_train_eval_contract/2" ]; then
+  GOAL_ROBOT_TYPE="libero_goal_4dv2"
+else
+  GOAL_ROBOT_TYPE="panda"
+fi
+
 if [ "${ROTATE_IMAGES:-false}" != "false" ] || [ -n "${DISABLE_KEYPOINTS:-}" ] \
-   || [ "${STATS_KEY_MODE:-panda}" != "panda" ] || [ "${ROBOT_TYPE_MODE:-panda}" != "panda" ] \
+   || [ "${STATS_KEY_MODE:-${GOAL_ROBOT_TYPE}}" != "${GOAL_ROBOT_TYPE}" ] \
+   || [ "${ROBOT_TYPE_MODE:-${GOAL_ROBOT_TYPE}}" != "${GOAL_ROBOT_TYPE}" ] \
    || [ "${INFERENCE_BACKEND:-standard}" != "standard" ]; then
   echo "FATAL: ROTATE_IMAGES/DISABLE_KEYPOINTS/STATS_KEY_MODE/ROBOT_TYPE_MODE/INFERENCE_BACKEND are fixed by the Goal contract"
   exit 2
 fi
 
 : "${CKPT_PATH:?ERROR: CKPT_PATH not set}"
-EVAL_LOG_DIR="${EVAL_LOG_DIR:-${CKPT_PATH}/../libero_plus_goal_$(date +%Y%m%d%H%M)}"
+EVAL_LOG_DIR="${EVAL_LOG_DIR:-/B/Log/${EXPR_NAME:-4dwvlaLbPlusGol0929}/$(date +%Y%m%d_%H%M%S)_eval}"
 mkdir -p "${EVAL_LOG_DIR}"
 DERIVED="${EVAL_LOG_DIR}/run_eval_goal_plus.derived.sh"
 
@@ -59,7 +67,7 @@ chmod +x "${DERIVED}"
 # the derived script computes PROJ from its own location unless PROJ is exported
 export PROJ EVAL_LOG_DIR
 export GOAL4D_CONTRACT="${CONTRACT}"
-export ROTATE_IMAGES=false STATS_KEY_MODE=panda ROBOT_TYPE_MODE=panda INFERENCE_BACKEND=standard
+export ROTATE_IMAGES=false STATS_KEY_MODE="${GOAL_ROBOT_TYPE}" ROBOT_TYPE_MODE="${GOAL_ROBOT_TYPE}" INFERENCE_BACKEND=standard
 unset DISABLE_KEYPOINTS
 
 echo "derived: ${DERIVED}"

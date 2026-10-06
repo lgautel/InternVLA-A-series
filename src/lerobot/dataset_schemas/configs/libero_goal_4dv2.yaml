@@ -1,0 +1,17 @@
+# LIBERO Goal v2.
+# observation.state = joint1..joint7 + eef_x,y,z + eef_ax,ay,az + gripper_opening.
+# action = EEF-delta-6D plus a gripper command.
+# Training must use dataset.action_mode=abs because stored action is already delta.
+# This action_mode is the prompt Control Mode, not the abs/delta transform switch.
+# action_mask_spec is intentionally omitted: state has 14 dimensions and action has 7.
+robot_type: libero_goal_4dv2
+feature_mapping:
+  observation.state:
+    - observation.state
+  action:
+    - action
+image_mapping:
+  observation.images.image: observation.images.image0
+  observation.images.image2: observation.images.image1
+action_mode: end_effector
+description: "LIBERO Goal v2: 14D joint7 + eef6 + gripper opening, 7D action unchanged"

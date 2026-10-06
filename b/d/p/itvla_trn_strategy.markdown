@@ -134,6 +134,8 @@ flowchart LR
     kptExpert --> actionExpert
 ```
 
+**[代码事实]** 上图表示模块级数据流：`actionExpert` 可通过 MoT cross-attention 使用 kpt 段 K/V；**foresight tokens 与 keypoint expert 之间无直接 attention 边**（foresight 在 action suffix 内，kpt 的 K/V 在实现上截断于 kpt 段末）。详见 [附录四 §42–§43](#42-问题定义与序列布局)。
+
 ### 3.2 输入、变换和模型输入格式
 
 当前 InternVLA transform 的典型顺序是：
@@ -265,6 +267,8 @@ flowchart TB
 foresight token 和上游 expert 产生梯度。训练脚本中的 `freeze_wan_dit=true` 不能理解成
 “video 分支没有梯度”，它只表示梯度不进入 WAN 自身参数。
 
+**[代码事实]** 补充：`kptGrad` **不**进入 `learnable_tokens` / `learnable_to_wan_proj`（kpt loss 不读 foresight 隐状态）；foresight 参数主要受 `videoGrad` 与 `actionGrad` 影响。kpt 与 foresight 的 attention 拓扑见 [附录四 §44](#44-训练-forward-与-loss-下的耦合)。
+
 ### 3.6 本地 GeoP 关键点损失
 
 启用 `enable_keypoint_predictor` 后，关键点分支产生：
@@ -284,6 +288,8 @@ $$\mathcal{L}_{\mathrm{kpt}}
 - \(\gamma\) 对应 `kpt_future_loss_weight`；
 - `pos_rot` 模式下位置和归一化后的旋转分量分别计算 MSE；
 - `kpt_mask=false` 的 Phase 1 样本不进入直接 keypoint reconstruction loss。
+
+关键点分支与 foresight / WAN 在 **loss 与梯度** 上相互独立（无 kpt→learnable 的现有接线）；MoT 上 foresight 可读 kpt、 kpt 不可读 foresight。详见 [附录四 §43–§44](#43-三层-mot-的-attention-契约)。数据层 history/future 与 action chunk 对齐见 [paper_code_analyz.md §15](paper_code_analyz.md)。
 
 本地 Libplus SFT 采用：
 
@@ -1370,6 +1376,8 @@ inference_steps in {4, 8, 10, 16}
 InternVLA-A1.5 最值得复制的不是某个孤立的 learning rate，而是“原生 VLM 语义保持 + FAST 离散动作 + 连续 flow matching + frozen-WAN latent foresight + 分阶段训练 + 按 source/task 重采样”的组合；对当前仓库，最快的效果提升路径是先修正 FAST/foresight/reorder/padding 等数据契约，再用 M1 混合、阶段式训练、vision 分模块 LR、同步图像增强和执行 horizon 做有控制的消融。
 
 ---
+
+# 附录一，处理“`tokenize_state=true` 时 foresight token 切片存在确定性偏移风险”的“双 state representation”方案
 
 ## 15. 已确定的实施范围：standard backend 下启用双 state 表示
 
@@ -2604,6 +2612,8 @@ KPT suffix  : continuous kpt state + history + query
 ```
 
 ---
+
+# 附录二，episode 边界 padding 与 `*_is_pad` 的处理
 
 ## 24. P0 专题：episode 边界 padding 与 `*_is_pad` 的真实情况
 
@@ -5080,3 +5090,1118 @@ echo "ACCEPTANCE PASSED"
 **最后一句**：本章修的是**训练契约的正确性**，不是一个调参技巧。它把 15% 的错误监督去掉了，
 但收益必须通过 M0/M1/M2 的 open-loop 尾部 MSE 和闭环 SR 来确认，不能从"修了 mask"直接推导出
 SR 提升。同时要记住，方案 A 无法触及 FAST/VLM 分支——那部分只有方案 B 能修。
+
+---
+
+# 附录三，修复"`tokenize_state=true` 时 foresight token 切片偏移"——保留原设计意图的条件化方案
+
+> 文档版本：2026-10-05
+> 代码基准：`/B/SRC/itvlaGpLibPlus/` 当前工作树
+> 前置：本文档 §6.1 和附录一 §16.3
+> 设计原则：扩展大于修改，保留 `tokenize_state` 的原始语义（有离散 state 时不必有连续 state），不影响其他功能
+
+## 33. 问题定位与根因分析
+
+### 33.1 bug 的精确描述
+
+当 `tokenize_state=true` 时，`embed_suffix()` 不生成连续 state token，suffix 布局为：
+
+```text
+tokenize_state=false: [continuous_state(1)] [learnable(N)] [action/time(C)]   # 长度 1+N+C=101
+tokenize_state=true : [learnable(N)] [action/time(C)]                         # 长度 N+C=100
+```
+
+但 `get_learnable_token_output()` 固定使用 `start=1`：
+
+```python:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+def get_learnable_token_output(self, suffix_out):
+    start = 1  # skip state token
+    end = 1 + self.config.num_learnable_tokens
+    return suffix_out[:, start:end]
+```
+
+当 `tokenize_state=true` 时，suffix 第 0 个 token 实际是 `foresight_0`，因此该代码会：
+
+1. **丢弃第一个 foresight token**（`suffix_out[:, 0]` = `foresight_0` 被跳过）
+2. **把第一个 action token 误当作最后一个 foresight token**（`suffix_out[:, N]` = `action_0` 被纳入）
+3. 将错误形状的 hidden states 投影给 WAN，**污染整个 video foresight 监督**
+
+### 33.2 受影响的调用链
+
+代码中使用 `get_learnable_token_output()` 的两个位置：
+
+1. **训练 forward**（`modeling_internvla_a1_5.py:1954`）：
+   ```python
+   learnable_out = self.get_learnable_token_output(suffix_out).to(dtype=torch.float32)
+   ```
+   → WAN video loss 使用了错误的 foresight token，训练期 foresight 监督被污染
+
+2. **推理 `denoise_step_full`**（`modeling_internvla_a1_5.py:1689`）：
+   ```python
+   learnable_out = self.get_learnable_token_output(suffix_out)
+   ```
+   → 视频可视化推理使用了错误的 foresight token
+
+**不受影响的调用链：**
+
+- `denoise_step()` 使用 `suffix_out[:, -self.config.chunk_size:]` 从尾部取 action，**不受影响**
+- `forward()` 的 action loss 同样使用尾部切片 `suffix_out[:, -self.config.chunk_size:]`，**不受影响**
+- `get_keypoint_token_output()` 使用 `kpt_out[:, -j:]` 从尾部取，**不受影响**
+
+### 33.3 三个位置的耦合关系
+
+切片偏移的根因是三处代码对 suffix 布局的假设不一致：
+
+| 代码位置 | 当前行为 | 对 `tokenize_state=true` 的假设 |
+|---|---|---|
+| `__init__` L997 | `if not self.config.tokenize_state:` 才创建 `state_proj` | ✅ 正确：无 state token |
+| `embed_suffix` L1522 | `if not self.config.tokenize_state:` 才拼接 state emb | ✅ 正确：不拼接 |
+| `get_learnable_token_output` L1638 | `start = 1` 固定跳过 | ❌ 错误：应从 0 开始 |
+
+这是一个典型的**索引契约**问题：`embed_suffix()` 的布局是条件化的，但 `get_learnable_token_output()` 的切片逻辑是硬编码的。
+
+### 33.4 optimized backend 的情况
+
+`modeling_internvla_a1_5_optimized.py` 的 `_full_suffix_len` 正确处理了条件：
+
+```python:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5_optimized.py
+def _full_suffix_len(self) -> int:
+    n_state = 0 if self.config.tokenize_state else 1
+    return n_state + self.config.num_learnable_tokens + self.config.chunk_size
+```
+
+但 optimized backend 要求 `action_loss_only=True`，此时 `get_learnable_token_output()` 不会被调用（video loss 被跳过），因此**该 bug 在 optimized 路径上不会触发**。本方案不修改 optimized backend。
+
+### 33.5 与附录一"双 state 表示"方案的区别
+
+附录一通过**无条件加入连续 state token** 来修复此 bug：让 `embed_suffix()` 在 `tokenize_state=true` 时也拼入 state token，使 suffix 始终为 `[state, learnable, action]`，从而让 `start=1` 恒正确。
+
+该方案的副作用是引入"双 state 表示"：VLM prefix 有离散 state 文本，Action Expert suffix 又有连续 state embedding。虽然可行，但**改变了原设计意图**——原设计中 `tokenize_state=true` 的含义正是"离散 state 已经足够，Action Expert 不需要额外的连续 state token"。
+
+本附录的方案**保留原设计意图**：`tokenize_state` 只控制 state 的表示方式（离散 vs 连续），不引入冗余的双重表示。修复方式是让 `get_learnable_token_output()` 正确感知 suffix 布局。
+
+## 34. 方案设计
+
+### 34.1 设计目标
+
+1. **修复 bug**：`tokenize_state=true` 时 foresight token 切片从正确的索引开始
+2. **保留原意**：`tokenize_state=true` 时 Action Expert suffix 中没有连续 state token（而不是"双 state 表示"）
+3. **扩展大于修改**：通过引入一个描述 suffix 布局的 property，让所有切片逻辑引用同一个 source of truth，而不是各自硬编码索引
+4. **不影响其他功能**：action loss、keypoint 分支、optimized backend、attention mask 和 position ids 均不受影响
+5. **可验证**：所有切片位置都能通过同一组单元测试覆盖
+
+### 34.2 核心设计：引入 suffix 布局描述
+
+**关键洞察**：bug 的根因不在于某一处索引写错了，而在于 suffix 的布局信息被分散在 `embed_suffix()` 的条件分支和各个切片函数中，没有一个**单一的、权威的布局描述**。
+
+方案引入一个只读 property `_suffix_state_len`，作为所有切片逻辑的 source of truth：
+
+```python
+@property
+def _suffix_state_len(self) -> int:
+    """Number of state tokens at the head of the action-expert suffix.
+    0 when tokenize_state=True (state is represented as discrete tokens in the VLM prefix),
+    1 when tokenize_state=False (continuous state embedding prepended to the suffix)."""
+    return 0 if self.config.tokenize_state else 1
+```
+
+所有需要理解 suffix 布局的位置都引用此 property，而不是各自硬编码 `0` 或 `1`。
+
+### 34.3 修改方案详述
+
+**以下所有修改仅涉及一个文件**：`src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py`
+
+#### 必改 1：新增 `_suffix_state_len` property
+
+在 `InternVLAA15` 类中，`embed_suffix` 方法之前，新增：
+
+```python
+@property
+def _suffix_state_len(self) -> int:
+    """Number of state tokens at the head of the action-expert suffix.
+
+    The suffix layout is:
+        [state(S)] [learnable(N)] [action/time(C)]
+    where S = _suffix_state_len.
+
+    When tokenize_state=True:  S=0, state is in VLM prefix as discrete text tokens.
+    When tokenize_state=False: S=1, continuous state embedding is prepended.
+    """
+    return 0 if self.config.tokenize_state else 1
+```
+
+这是**纯新增**，不修改任何现有代码。
+
+#### 必改 2：修正 `get_learnable_token_output()`
+
+当前代码（`modeling_internvla_a1_5.py:1637-1640`）：
+
+```python
+def get_learnable_token_output(self, suffix_out):
+    start = 1  # skip state token
+    end = 1 + self.config.num_learnable_tokens
+    return suffix_out[:, start:end]
+```
+
+改为：
+
+```python
+def get_learnable_token_output(self, suffix_out):
+    s = self._suffix_state_len
+    start = s
+    end = s + self.config.num_learnable_tokens
+    return suffix_out[:, start:end]
+```
+
+**变化分析**：
+- `tokenize_state=false`：`s=1`，`start=1`，与修改前**完全相同**
+- `tokenize_state=true`：`s=0`，`start=0`，正确从第一个 foresight token 开始
+
+#### 建议改 3：为 `denoise_step_full` 的 action 切片统一用 property
+
+当前 `denoise_step_full`（L1690-1692）：
+
+```python
+action_out = suffix_out[:, -self.config.chunk_size:]
+```
+
+这段代码使用**尾部相对索引**，本身是正确的，不受 state token 存在性影响。但为了文档一致性和未来可维护性，建议加一个 assert 确认布局：
+
+```python
+suffix_out = outputs_embeds[1]
+
+# Verify suffix layout invariant
+assert suffix_out.shape[1] == self._suffix_state_len + self.config.num_learnable_tokens + self.config.chunk_size, \
+    f"Suffix length mismatch: got {suffix_out.shape[1]}, expected {self._suffix_state_len + self.config.num_learnable_tokens + self.config.chunk_size}"
+
+learnable_out = self.get_learnable_token_output(suffix_out)
+action_out = suffix_out[:, -self.config.chunk_size:]
+```
+
+此 assert 在 debug/测试阶段提供保护；如不希望在推理热路径中保留，可改为只在 `self.training` 时检查。
+
+#### 不修改的位置
+
+以下位置使用**尾部相对索引**（`[:, -chunk_size:]`），天然与 state token 无关，**不需要修改**：
+
+| 位置 | 代码 | 原因 |
+|---|---|---|
+| `denoise_step` L1476 | `suffix_out[:, -self.config.chunk_size:]` | 尾部切片不依赖头部布局 |
+| `forward` L1943 | `suffix_out[:, -self.config.chunk_size:]` | 同上 |
+| `denoise_step_full` L1690 | `suffix_out[:, -self.config.chunk_size:]` | 同上 |
+| `get_keypoint_token_output` L1632 | `kpt_out[:, -j:]` | keypoint suffix 有独立布局 |
+| `embed_suffix` L1515-1568 | 条件化拼接 | 生产布局的代码本身是正确的 |
+| `__init__` L996-998 | 条件化创建 `state_proj` | 与 `embed_suffix` 一致 |
+| 所有 mask/position 代码 | 使用 `suffix_len` 动态长度 | 自动适应 |
+
+#### 不修改的文件
+
+| 文件 | 原因 |
+|---|---|
+| `modeling_internvla_a1_5_optimized.py` | 已有正确的 `_full_suffix_len`，且 video path 不可达 |
+| `configuration_internvla_a1_5.py` | 无布局假设 |
+| `transform_internvla_a1_5.py` | 无布局假设 |
+| `tests/test_step2_attention_mask.py` | 当前 `A=100` 对 `tokenize_state=true` 是正确的 |
+
+## 35. 修改前后的 suffix 布局对比
+
+### 35.1 修改前（有 bug）
+
+```text
+tokenize_state=false:
+    embed_suffix -> [state(1)] [foresight(50)] [action(50)]    长度=101
+    get_learnable_token_output -> suffix_out[:, 1:51]          ✅ = foresight_0..49
+    action_out -> suffix_out[:, -50:]                          ✅ = action_0..49
+
+tokenize_state=true:
+    embed_suffix -> [foresight(50)] [action(50)]               长度=100
+    get_learnable_token_output -> suffix_out[:, 1:51]          ❌ = foresight_1..49 + action_0
+    action_out -> suffix_out[:, -50:]                          ✅ = action_0..49
+```
+
+### 35.2 修改后（修复）
+
+```text
+tokenize_state=false:
+    _suffix_state_len = 1
+    embed_suffix -> [state(1)] [foresight(50)] [action(50)]    长度=101
+    get_learnable_token_output -> suffix_out[:, 1:51]          ✅ = foresight_0..49 (不变)
+    action_out -> suffix_out[:, -50:]                          ✅ = action_0..49 (不变)
+
+tokenize_state=true:
+    _suffix_state_len = 0
+    embed_suffix -> [foresight(50)] [action(50)]               长度=100
+    get_learnable_token_output -> suffix_out[:, 0:50]          ✅ = foresight_0..49 (修复)
+    action_out -> suffix_out[:, -50:]                          ✅ = action_0..49 (不变)
+```
+
+### 35.3 语义保持的关键证明
+
+设 `N = num_learnable_tokens`, `C = chunk_size`, `S = _suffix_state_len`。
+
+修复后的 `get_learnable_token_output()` 取 `suffix_out[:, S:S+N]`。
+
+**命题：** 对任何 `tokenize_state` 取值，`suffix_out[:, S:S+N]` 恰好是 N 个 foresight token 的输出。
+
+**证明：**
+- `embed_suffix()` 按顺序拼接 `[state(S), learnable(N), action(C)]`
+- 模型 forward 不改变序列长度，所以 `suffix_out` 的第 `[S, S+N)` 段恰好对应 learnable input 的输出
+- `S=0` 时正确取 `[0, N)`；`S=1` 时正确取 `[1, 1+N)` ∎
+
+**推论：** action 的尾部切片 `suffix_out[:, -C:]` 始终正确，因为 `suffix_out` 长度 = `S+N+C`，从尾部取 `C` 个恰好是 action 段。
+
+## 36. 具体代码实现
+
+### 36.1 修改 1：新增 `_suffix_state_len` property
+
+**文件：** `src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py`
+
+**位置：** 在 `embed_suffix` 方法之前（约 L1511 附近），`train()` 方法之后。
+
+**新增代码：**
+
+```python
+# ------------------------------------------------------------------
+# Suffix layout descriptor
+# ------------------------------------------------------------------
+
+@property
+def _suffix_state_len(self) -> int:
+    """Number of state tokens at the head of the action-expert suffix.
+
+    Suffix layout: [state(S)] [learnable(N)] [action/time(C)], where S = this value.
+    S=0 when tokenize_state=True (discrete state in VLM prefix is sufficient).
+    S=1 when tokenize_state=False (continuous state embedding prepended).
+    """
+    return 0 if self.config.tokenize_state else 1
+```
+
+### 36.2 修改 2：修正 `get_learnable_token_output()`
+
+**文件：** 同上
+
+**位置：** L1637-1640
+
+**原代码：**
+
+```python
+def get_learnable_token_output(self, suffix_out):
+    start = 1  # skip state token
+    end = 1 + self.config.num_learnable_tokens
+    return suffix_out[:, start:end]
+```
+
+**替换为：**
+
+```python
+def get_learnable_token_output(self, suffix_out):
+    s = self._suffix_state_len
+    return suffix_out[:, s : s + self.config.num_learnable_tokens]
+```
+
+### 36.3 修改 3（建议）：在 `denoise_step_full` 中加入布局断言
+
+**文件：** 同上
+
+**位置：** `denoise_step_full` 方法中 `suffix_out = outputs_embeds[1]` 之后（约 L1688）
+
+**在 `suffix_out = outputs_embeds[1]` 后面插入：**
+
+```python
+if self.training:
+    _expected = self._suffix_state_len + self.config.num_learnable_tokens + self.config.chunk_size
+    assert suffix_out.shape[1] == _expected, (
+        f"Action suffix length {suffix_out.shape[1]} != expected {_expected} "
+        f"(S={self._suffix_state_len}, N={self.config.num_learnable_tokens}, C={self.config.chunk_size})"
+    )
+```
+
+### 36.4 修改 4（建议）：在 `forward` 的 video loss 路径中也加入断言
+
+**文件：** 同上
+
+**位置：** `forward` 方法中 `learnable_out = self.get_learnable_token_output(suffix_out)` 之前（约 L1953）
+
+**在 `learnable_out = self.get_learnable_token_output(suffix_out).to(...)` 前插入：**
+
+```python
+_expected = self._suffix_state_len + self.config.num_learnable_tokens + self.config.chunk_size
+assert suffix_out.shape[1] == _expected, (
+    f"Suffix layout violation in forward: {suffix_out.shape[1]} != {_expected}"
+)
+```
+
+### 36.5 改动量统计
+
+| 修改 | 类型 | 行数 | 影响范围 |
+|---|---|---|---|
+| `_suffix_state_len` property | 新增 | ~10 | `InternVLAA15` 类新 API |
+| `get_learnable_token_output` | 修改 | 2 行变 2 行 | 修复核心 bug |
+| `denoise_step_full` 断言 | 新增 | ~4 | 仅 training 时 |
+| `forward` video 路径断言 | 新增 | ~3 | 仅启用 video loss 时 |
+| **总计** | | ~19 行 | 1 个文件 |
+
+**不修改任何其他文件、不修改任何配置项、不改变任何 public API、不引入新的配置开关。**
+
+## 37. 对其他功能的影响分析
+
+### 37.1 `tokenize_state=false` 路径完全不变
+
+当 `tokenize_state=false` 时：
+- `_suffix_state_len` = 1
+- `get_learnable_token_output` 的 `start` = 1
+- 这与修改前 `start = 1` **完全相同**，不产生任何数值差异
+
+### 37.2 action loss 路径不受影响
+
+所有 action loss 相关切片使用 `suffix_out[:, -self.config.chunk_size:]`，这是**尾部相对索引**，与头部 state token 的存在性无关。
+
+### 37.3 keypoint 分支不受影响
+
+`embed_kpt_suffix()` 和 `get_keypoint_token_output()` 使用完全独立的 keypoint suffix，不依赖 action suffix 的布局。
+
+### 37.4 attention mask 和 position ids 不受影响
+
+当前代码中所有 mask 和 position 计算都使用 `suffix_len = suffix_pad_masks.shape[1]`，这是动态获取的，自动适应不同的 suffix 长度。`embed_suffix()` 的 `att_masks` 生成逻辑也不需要改变。
+
+### 37.5 optimized backend 不受影响
+
+本方案不修改 `modeling_internvla_a1_5_optimized.py`。该文件：
+- 有自己的 `_full_suffix_len`，已正确处理 `tokenize_state`
+- 要求 `action_loss_only=True`，`get_learnable_token_output()` 不可达
+- 如果未来 optimized backend 需要 video path，可以直接继承修复后的 `get_learnable_token_output()` 或 `_suffix_state_len`
+
+### 37.6 现有测试的兼容性
+
+当前 `tests/test_step2_attention_mask.py` 中 `tokenize_state=true` 使用 `A=100`，`tokenize_state=false` 使用 `A=101`——这些**仍然正确**，因为本方案不改变 suffix 长度，只改变切片起点。
+
+## 38. 测试方案
+
+### 38.1 新增测试文件 `tests/test_foresight_slice.py`
+
+```python
+"""Foresight token slice correctness for tokenize_state=True/False.
+
+Covers b/d/p/itvla_trn_strategy.markdown §6.1 and §33-§41.
+Verifies that get_learnable_token_output() returns the correct N foresight tokens
+regardless of tokenize_state, and that no action token is ever mistakenly included.
+
+Run with:
+    PYTHONPATH=src pytest tests/test_foresight_slice.py -v
+"""
+
+from __future__ import annotations
+import pytest
+import torch
+
+
+# ----- Helpers -----
+
+def _make_model(tokenize_state: bool, num_learnable_tokens: int = 3, chunk_size: int = 2):
+    """Build a minimal mock that exercises get_learnable_token_output and _suffix_state_len."""
+    from lerobot.policies.internvla_a1_5.modeling_internvla_a1_5 import InternVLAA15
+
+    class _Cfg:
+        pass
+
+    cfg = _Cfg()
+    cfg.tokenize_state = tokenize_state
+    cfg.num_learnable_tokens = num_learnable_tokens
+    cfg.chunk_size = chunk_size
+
+    obj = object.__new__(InternVLAA15)
+    obj.config = cfg
+    return obj
+
+
+def _build_suffix_out(state_len: int, num_lt: int, chunk: int, hidden: int = 8):
+    """Build a suffix_out tensor where each token position has a unique, identifiable value.
+
+    Token values:
+        state tokens:    value in [1000, 1001, ...]
+        learnable tokens: value in [2000, 2001, ...]
+        action tokens:   value in [3000, 3001, ...]
+    """
+    total = state_len + num_lt + chunk
+    suffix_out = torch.zeros(1, total, hidden, dtype=torch.float32)
+    pos = 0
+    for i in range(state_len):
+        suffix_out[0, pos] = 1000 + i
+        pos += 1
+    for i in range(num_lt):
+        suffix_out[0, pos] = 2000 + i
+        pos += 1
+    for i in range(chunk):
+        suffix_out[0, pos] = 3000 + i
+        pos += 1
+    return suffix_out
+
+
+# ----- T1: _suffix_state_len property -----
+
+class TestSuffixStateLen:
+    def test_tokenize_state_true_returns_zero(self):
+        model = _make_model(tokenize_state=True)
+        assert model._suffix_state_len == 0
+
+    def test_tokenize_state_false_returns_one(self):
+        model = _make_model(tokenize_state=False)
+        assert model._suffix_state_len == 1
+
+
+# ----- T2: get_learnable_token_output core correctness -----
+
+class TestGetLearnableTokenOutput:
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_returns_exactly_n_foresight_tokens(self, tokenize_state):
+        """Core invariant: the returned slice must contain exactly the N learnable tokens."""
+        N, C = 3, 2
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        suffix_out = _build_suffix_out(S, N, C)
+        result = model.get_learnable_token_output(suffix_out)
+        assert result.shape == (1, N, 8)
+        for i in range(N):
+            assert result[0, i, 0].item() == 2000 + i, \
+                f"Token {i} should be foresight_{i} (2000+{i}), got {result[0, i, 0].item()}"
+
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_no_state_token_in_output(self, tokenize_state):
+        """No state token (1000+) should appear in the learnable output."""
+        N, C = 3, 2
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        suffix_out = _build_suffix_out(S, N, C)
+        result = model.get_learnable_token_output(suffix_out)
+        for i in range(N):
+            assert result[0, i, 0].item() < 1000 or result[0, i, 0].item() >= 2000, \
+                f"Token {i} is a state token (value {result[0, i, 0].item()})"
+
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_no_action_token_in_output(self, tokenize_state):
+        """No action token (3000+) should appear in the learnable output."""
+        N, C = 3, 2
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        suffix_out = _build_suffix_out(S, N, C)
+        result = model.get_learnable_token_output(suffix_out)
+        for i in range(N):
+            assert result[0, i, 0].item() < 3000, \
+                f"Token {i} is an action token (value {result[0, i, 0].item()})"
+
+    def test_tokenize_state_false_unchanged_from_legacy(self):
+        """For tokenize_state=false, the slice must be identical to the old start=1 logic."""
+        N, C = 50, 50
+        model = _make_model(tokenize_state=False, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        suffix_out = torch.randn(2, S + N + C, 64)
+        result = model.get_learnable_token_output(suffix_out)
+        legacy = suffix_out[:, 1 : 1 + N]
+        assert torch.equal(result, legacy)
+
+
+# ----- T3: suffix layout invariant -----
+
+class TestSuffixLayoutInvariant:
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_foresight_and_action_are_disjoint_and_complete(self, tokenize_state):
+        """Learnable slice and action tail-slice must not overlap and must cover all non-state tokens."""
+        N, C = 5, 4
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        suffix_out = _build_suffix_out(S, N, C, hidden=1)
+
+        learnable = model.get_learnable_token_output(suffix_out)
+        action = suffix_out[:, -C:]
+
+        # Disjoint: no value in learnable should appear in action
+        l_vals = set(learnable[0, :, 0].tolist())
+        a_vals = set(action[0, :, 0].tolist())
+        assert l_vals.isdisjoint(a_vals), f"Overlap: {l_vals & a_vals}"
+
+        # Complete: learnable + action cover all non-state tokens
+        all_non_state_vals = {suffix_out[0, i, 0].item() for i in range(S, S + N + C)}
+        covered = l_vals | a_vals
+        assert covered == all_non_state_vals
+
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_suffix_length_consistency(self, tokenize_state):
+        """Total suffix length must be S + N + C."""
+        N, C = 50, 50
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        expected = S + N + C
+        # This is the length that embed_suffix() produces (verified by existing tests)
+        if tokenize_state:
+            assert expected == 100
+        else:
+            assert expected == 101
+
+
+# ----- T4: production-size parameters -----
+
+class TestProductionSizeSlice:
+    @pytest.mark.parametrize("tokenize_state,expected_total", [(True, 100), (False, 101)])
+    def test_production_n50_c50(self, tokenize_state, expected_total):
+        """With production defaults N=50, C=50, verify the slice on a full-size suffix_out."""
+        N, C = 50, 50
+        model = _make_model(tokenize_state=tokenize_state, num_learnable_tokens=N, chunk_size=C)
+        S = model._suffix_state_len
+        assert S + N + C == expected_total
+
+        suffix_out = _build_suffix_out(S, N, C, hidden=16)
+        learnable = model.get_learnable_token_output(suffix_out)
+        assert learnable.shape == (1, 50, 16)
+        assert learnable[0, 0, 0].item() == 2000  # first foresight token
+        assert learnable[0, 49, 0].item() == 2049  # last foresight token
+
+        action = suffix_out[:, -C:]
+        assert action[0, 0, 0].item() == 3000  # first action token
+        assert action[0, 49, 0].item() == 3049  # last action token
+
+
+# ----- T5: embed_suffix output length matches _suffix_state_len -----
+
+class TestEmbedSuffixLengthAgreement:
+    """Verifies that embed_suffix() produces a suffix whose length matches _suffix_state_len + N + C.
+    Requires constructing a minimal model with state_proj, learnable_tokens, etc.
+    Skip if tiny checkpoint is not available."""
+
+    @pytest.fixture
+    def model_pair(self):
+        """Try to construct real InternVLAA15 instances for both tokenize_state settings."""
+        pytest.importorskip("transformers")
+        from lerobot.policies.internvla_a1_5.configuration_internvla_a1_5 import InternVLAA15Config
+
+        results = {}
+        for ts in (True, False):
+            try:
+                cfg = InternVLAA15Config(
+                    tokenize_state=ts,
+                    action_loss_only=True,
+                    num_learnable_tokens=3,
+                    chunk_size=2,
+                    max_state_dim=4,
+                    max_action_dim=4,
+                )
+                from lerobot.policies.internvla_a1_5.modeling_internvla_a1_5 import InternVLAA15
+                model = InternVLAA15(cfg)
+                model.eval()
+                results[ts] = model
+            except Exception:
+                pass
+        if not results:
+            pytest.skip("Cannot construct InternVLAA15 model")
+        return results
+
+    @pytest.mark.parametrize("tokenize_state", [True, False])
+    def test_embed_suffix_length(self, model_pair, tokenize_state):
+        if tokenize_state not in model_pair:
+            pytest.skip(f"Model for tokenize_state={tokenize_state} not available")
+        model = model_pair[tokenize_state]
+        S = model._suffix_state_len
+        N = model.config.num_learnable_tokens
+        C = model.config.chunk_size
+
+        state = torch.randn(1, model.config.max_state_dim)
+        noisy_actions = torch.randn(1, C, model.config.max_action_dim)
+        timestep = torch.tensor([0.5])
+
+        with torch.no_grad():
+            embs, pad_masks, att_masks = model.embed_suffix(state, noisy_actions, timestep)
+
+        assert embs.shape[1] == S + N + C, \
+            f"embed_suffix length {embs.shape[1]} != S({S}) + N({N}) + C({C}) = {S + N + C}"
+```
+
+### 38.2 测试覆盖矩阵
+
+| 测试 | 输入 | 断言 | 覆盖的关键性质 | 需 GPU |
+|---|---|---|---|---|
+| T1: `_suffix_state_len` | 两种 `tokenize_state` | 返回值 0 或 1 | property 正确性 | 否 |
+| T2: `get_learnable_token_output` 核心 | 标记过的 suffix_out | 恰好包含 N 个 foresight token | **bug 修复的核心验证** | 否 |
+| T2: 不含 state token | 同上 | 输出中无 1000+ 值 | 不混入 state token | 否 |
+| T2: 不含 action token | 同上 | 输出中无 3000+ 值 | **不混入 action token**（bug 本质） | 否 |
+| T2: `tokenize_state=false` 回归 | 随机 suffix_out | 与旧 `start=1` 逻辑**逐位相同** | 不影响已有功能 | 否 |
+| T3: 不相交且完整 | 两种 `tokenize_state` | learnable 和 action 不重叠且覆盖全部非 state token | 布局完整性 | 否 |
+| T3: 长度一致性 | 两种 `tokenize_state` | 总长度 = S+N+C | 布局正确性 | 否 |
+| T4: 生产尺寸 | N=50, C=50 | 切片正确、首尾 token 值正确 | 真实参数下的验证 | 否 |
+| T5: `embed_suffix` 长度 | 真实模型的 `embed_suffix` 输出 | 长度 = `_suffix_state_len + N + C` | property 与实际布局的一致性 | 可选 |
+
+### 38.3 已覆盖的关键不变量
+
+1. **修复正确性**：`tokenize_state=true` 时返回的第一个 token 是 `foresight_0`，不是 `foresight_1`
+2. **无 action 泄漏**：返回的 token 中没有任何 action token（bug 的直接症状）
+3. **回归安全**：`tokenize_state=false` 路径与修改前**逐位相同**
+4. **布局完整性**：foresight 切片和 action 尾部切片不重叠且完整覆盖
+5. **尺寸一致性**：`_suffix_state_len` 与 `embed_suffix()` 的实际输出长度一致
+
+### 38.4 未覆盖的分支（及原因）
+
+| 未覆盖项 | 原因 | 缓解 |
+|---|---|---|
+| WAN video loss 的端到端 forward | 需要加载 5B WAN 模型 | 由 WAN smoke 覆盖（§39 的 A4） |
+| `denoise_step_full` 的推理路径 | 需要完整 VLM prefix | 由 open-loop 测试覆盖 |
+| `modeling_internvla_a1_5_optimized.py` | 不受影响，不修改 | optimized 的 video path 不可达 |
+| 多 GPU DDP | 本改动不涉及通信 | 不需要 |
+
+## 39. 验收方案
+
+### 39.1 验收脚本
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Acceptance gate for foresight-slice-offset fix (§6.1)
+cd /B/SRC/itvlaGpLibPlus
+
+echo "=== A1: lint ==="
+ruff check src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+ruff format --check src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+
+echo "=== A2: new foresight slice tests ==="
+PYTHONPATH=src pytest tests/test_foresight_slice.py -v --tb=short
+
+echo "=== A3: existing tests regression ==="
+PYTHONPATH=src pytest tests/test_step2_attention_mask.py -v --tb=short
+
+echo "=== A4: WAN smoke (if GPU available) ==="
+# 2-step forward with tokenize_state=true and video loss enabled
+# Should produce finite loss_video and non-zero foresight gradients
+# Skipped if no GPU available
+
+echo "=== A5: open-loop test ==="
+# python tests/openloop_internvla_a1_5.py --ckpt-path <path> --visualize-future
+# Verifies denoise_step_full returns correct learnable tokens
+
+echo "ACCEPTANCE PASSED"
+```
+
+### 39.2 验收条件
+
+#### 必须通过（正确性）
+
+| 编号 | 条件 | 判定方式 |
+|---|---|---|
+| A1 | ruff lint 通过 | 退出码 0 |
+| A2 | `tests/test_foresight_slice.py` 全绿 | pytest 退出码 0 |
+| A3 | `tests/test_step2_attention_mask.py` 全绿（回归） | pytest 退出码 0 |
+| A4 | `tokenize_state=true` + video loss 的 WAN smoke 无 shape error / NaN / Inf | 日志检查 |
+| A5 | `get_learnable_token_output()` 返回的 token shape 正确 | 断言通过 |
+| A6 | `tokenize_state=false` 路径与修改前**逐位相同** | T2 的 `test_tokenize_state_false_unchanged_from_legacy` |
+
+#### 效果验收（需重新训练）
+
+| 指标 | 期望 | 说明 |
+|---|---|---|
+| `loss_video` 收敛行为 | 修复后应更平滑或更低 | foresight 监督不再被 action token 污染 |
+| foresight token gradient norm | 修复后应更大（有效监督恢复） | `learnable_tokens.grad` |
+| LIBERO-Plus / OOD SR | 不低于修复前 | video foresight 主要影响 OOD/动态任务 |
+| 标准 LIBERO SR | 不低于修复前 | 不能产生回归 |
+
+## 40. 实施顺序
+
+```text
+1. 确认当前 tests/test_step2_attention_mask.py 全绿（基线）
+2. 新增 tests/test_foresight_slice.py（此时 T2 的 tokenize_state=true 用例应 FAIL，确认 bug 存在）
+3. 在 InternVLAA15 中新增 _suffix_state_len property
+4. 修改 get_learnable_token_output() 使用 _suffix_state_len
+5. 运行 tests/test_foresight_slice.py（应全绿）
+6. 运行 tests/test_step2_attention_mask.py（回归检查，应全绿）
+7. 可选：在 denoise_step_full 和 forward 中加入布局断言
+8. WAN smoke test（如有 GPU）
+9. 重新训练并评估
+```
+
+**建议在步骤 2 先运行一次，确认 tokenize_state=true 的用例确实 FAIL**——这证明了 bug 在测试中可复现，修复后转绿才有意义。
+
+## 41. 总结
+
+### 41.1 对比两种修复方案
+
+| 维度 | 附录一（双 state 表示） | 本附录（条件化切片） |
+|---|---|---|
+| 修改量 | 2 处必改 + 测试调整 | 1 个 property + 1 处切片修改 |
+| suffix 布局变化 | `tokenize_state=true` 从 100 变 101 | 不变，仍为 100 |
+| 设计意图保留 | 引入新语义（双 state） | **保留原意**（离散 state 即足够） |
+| 对 `tokenize_state=false` 路径 | 不变 | 不变 |
+| 对 attention mask 测试 | 需更新 `A=100` → `A=101` | **不需更新** |
+| 参数量变化 | +33.8K（`state_proj`） | 0 |
+| 需要修改的文件数 | 1-2 | 1 |
+| 训练效果 | 可能更好（连续 state 信号） | 修复 bug，效果取决于 foresight 监督恢复 |
+
+两种方案都能修复 bug。选择哪种取决于**是否需要 Action Expert 在 `tokenize_state=true` 时也获得连续 state 输入**：
+
+- 如果认为离散 state 在 VLM prefix 中已经足够，Action Expert 通过 cross-attention 已经能获取足够的 state 信息 → **本方案（条件化切片）**
+- 如果认为 Action Expert 需要直接的连续 state 数值输入，且愿意接受双 state 表示的额外复杂度 → **附录一方案**
+
+### 41.2 最终实施范围
+
+```text
+修改 1 个文件:   modeling_internvla_a1_5.py
+新增 1 个 property: _suffix_state_len（~10 行）
+修改 1 个方法:    get_learnable_token_output（2 行 → 2 行）
+新增 2 处断言:    denoise_step_full + forward（可选，~7 行）
+新增 1 个测试文件: tests/test_foresight_slice.py（~230 行）
+不改配置: 无新开关
+不改 API: 无 public API 变化
+不改其他文件: optimized backend / transforms / configs / 其他测试
+```
+
+**核心修复只有 2 行代码变化**（`get_learnable_token_output` 中的 `start` 从硬编码 `1` 变为 `self._suffix_state_len`），其余是保护措施和测试。
+
+---
+
+# 附录四，Keypoint Expert 与 Foresight Tokens 的信息交互及扩展方案
+
+> 文档版本：2026-10-06  
+> 代码基准：`/B/SRC/itvlaGpLibPlus/` 当前工作树  
+> 证据分级：沿用正文 [§2](#2-证据分级和资料范围)（**[代码事实]** / **[待验证建议]** 等）  
+> **交叉引用**：[paper_code_analyz.md §15](paper_code_analyz.md)（3D keypoint history/future 与 action chunk 的数据层对齐）；本附录专注 **MoT 段间 attention** 与 **latent foresight ↔ keypoint expert** 关系。  
+> **范围**：`enable_keypoint_predictor=True` 且 **standard** `modeling_internvla_a1_5.py` 路径；optimized 后端无 kpt（见 §45）。
+
+## 42. 问题定义与序列布局
+
+### 42.1 读者常问的两个问题
+
+1. **Foresight tokens 与 keypoint expert 能否通过 attention 互相看到？**  
+2. **若希望 kpt 预测显式依赖 latent foresight，现有代码差在哪、有哪些低风险改法？**
+
+本节先用 **[代码事实]** 回答第 1 问；§47 用 **[待验证建议]** 回答第 2 问。
+
+### 42.2 Foresight 在代码里是什么
+
+论文中的 foresight tokens 对应实现中的 **`learnable_tokens`**（可学习参数）经 **`learnable_tokens_in_proj`** 投影后，进入 **action expert suffix**，与 flow-matching 的 action+time token 并列：
+
+```1515:1543:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def embed_suffix(self, state, noisy_actions, timestep):
+        """Build suffix: [state(1)] [learnable(N)] [action_time(chunk_size)]."""
+        ...
+        num_lt = self.config.num_learnable_tokens
+        lt_emb = self._apply_checkpoint(
+            lambda t: self.learnable_tokens_in_proj(t), self.learnable_tokens
+        )
+        ...
+        att_masks += [1] + [0] * (num_lt - 1)
+```
+
+- \(N = \texttt{num\_learnable\_tokens}\)（默认 50）与 \(\texttt{chunk\_size}\)（默认 50）**代码未强制相等**（见 [paper_code_analyz.md §14.5.3](paper_code_analyz.md)）。
+- 当 `tokenize_state=true` 时，suffix **可能无**连续 `state_proj` token，布局与 `get_learnable_token_output` 切片有关（附录一/附录三）；本附录在讨论 attention 拓扑时默认 **`tokenize_state=false` 且含 1 个 state token** 的 canonical 布局，与 `get_learnable_token_output` 当前 `start=1` 一致。
+
+训练时，foresight 的 **隐状态** 来自 action suffix 在 MoT 各层更新后的输出；video 分支通过 `get_learnable_token_output(suffix_out)` 切片再 `learnable_to_wan_proj` 条件化 WAN（正文 §3.5）。
+
+### 42.3 Keypoint suffix 布局
+
+GeoPredict 融合路径下，kpt 段由 `embed_kpt_suffix` 构造：
+
+```1575:1623:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    def embed_kpt_suffix(self, state, his_kpts=None, his_len=None):
+        """Build the keypoint-expert suffix: ``[state(1)] [history-track(J)] [query(J)]``.
+```
+
+- **1** 个 kpt state token（`kpt_state_proj`）；
+- **J** 个 history token（`TrackEncoder(his_kpts, his_len)`，每 joint 一个）；
+- **J** 个 query token（`keypoint_embedding`）。
+
+关键点 **future 轨迹监督** 不在序列里占 \(C\times J\) 个 token，而在 forward 末尾用 `kpt_query_out + future_kpt_pos_embed` 并行 head（详见 [paper_code_analyz.md §15.4](paper_code_analyz.md)）。
+
+### 42.4 训练时整段 token 顺序
+
+启用 kpt 时，**一次** training forward 的拼接顺序为：
+
+```text
+[ VLM prefix | kpt suffix (1+2J) | action suffix (1+N+C 或 N+C) ]
+```
+
+证据：`InternVLAA15.forward` 中 `pad_masks = cat(prefix, kpt, suffix)` 与 3-path joint forward（`modeling_internvla_a1_5.py` 约 L1817–1899）。
+
+```mermaid
+flowchart LR
+  subgraph seq [训练 token 序列左到右]
+    P[VLM_prefix]
+    K[kpt_suffix_1plus2J]
+    S[action_suffix_state_learnable_actiontime]
+  end
+  P --> K --> S
+```
+
+正文 [§3.1](#31-模型的静态职责) 的 mermaid 是 **模块级数据流**（history→kptExpert→actionExpert）；**不表示** foresight 与 kptExpert 之间有直接 attention 边（见 §43、§46）。
+
+---
+
+## 43. 三层 MoT 的 attention 契约
+
+### 43.1 设计规则（源码注释 + 实现）
+
+GeoPredict 三路 MoT 在 `compute_layer_complete_3path` 中实现。文档串与 attention 范围：
+
+```373:376:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+    Attention rules (see design doc §7/§3.3): prefix only attends to itself; the keypoint expert
+    attends to [prefix, keypoint]; the action expert attends to [prefix, keypoint, action]. This
+    is enforced both by the block-causal ``attention_mask`` slices below and by construction
+    (queries from an earlier path are never combined with keys from a later path).
+```
+
+**full_attention** 层内的 K/V 拼接与 mask 切片：
+
+```494:514:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+        prefix_attn_mask = attention_mask[:, :, :prefix_len, :prefix_len]
+        prefix_att_output = _run_attn(prefix_query, prefix_key, prefix_value, prefix_attn_mask)
+
+        prefix_key_for_kpt = prefix_key.detach() if knowledge_insulation_kpt else prefix_key
+        ...
+        k_for_kpt = torch.cat([prefix_key_for_kpt, kpt_key], dim=2)
+        v_for_kpt = torch.cat([prefix_value_for_kpt, kpt_value], dim=2)
+        kpt_attn_mask = attention_mask[:, :, prefix_len:kpt_end, :kpt_end]
+        kpt_att_output = _run_attn(kpt_query, k_for_kpt, v_for_kpt, kpt_attn_mask)
+
+        ...
+        k_for_action = torch.cat([prefix_key_for_action, kpt_key_for_action, action_key], dim=2)
+        ...
+        action_attn_mask = attention_mask[:, :, kpt_end:, :]
+        action_att_output = _run_attn(action_query, k_for_action, v_for_action, action_attn_mask)
+```
+
+其中 `kpt_end = prefix_len + kpt_len`；**action 段**（含 foresight + action+time）从 `kpt_end` 起。因此 **kpt 的 query 永远看不到 `action_key` 中的 foresight 槽位**。
+
+### 43.2 块因果 mask 与 suffix 内部
+
+段内还用 `att_masks` + `make_att_2d_masks` 做 block 因果（Pi0 风格 cumsum）。action suffix 内 learnable 块：`att_masks += [1] + [0] * (num_lt - 1)`（L1543），使 foresight 组内可双向、组间因果。该机制 **只作用于 action 段内部**，不改变「kpt 看不到 action 段」的段间规则。
+
+### 43.3 信息方向速查表
+
+| 信息方向 | 当前代码 | 机制 |
+|---|---|---|
+| Foresight → kpt | **否** | kpt 的 K/V 在 `kpt_end` 截断，不含 action |
+| kpt → Foresight（learnable 隐状态） | **是** | learnable 属于 action query，attend `k_for_action` 含 kpt（除非 `kpt_to_action_detach`） |
+| kpt → action+time | **是** | 同上 |
+| Foresight → action+time | **是** | action 段内 block mask |
+| VLM prefix → kpt / foresight | **是** | 二者均可 attend prefix（kpt 侧可选 `knowledge_insulation_kpt` detach） |
+| foresight / action → VLM prefix | **否** | prefix 仅 self-attend |
+| WAN `loss_video` → foresight 参数 | **是** | `get_learnable_token_output` → `learnable_to_wan_proj`；**不经过 kpt 分支** |
+| `loss_kpt` → `learnable_tokens` | **否** | kpt head 只读 `kpt_out`，不读 `suffix_out` 的 learnable 切片 |
+
+配置 **[代码事实]**（[`configuration_internvla_a1_5.py`](src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py)）：
+
+- `knowledge_insulation`：action 读 prefix 时 detach K/V；
+- `knowledge_insulation_kpt`：kpt 读 prefix 时 detach K/V；
+- `kpt_to_action_detach`：action（含 foresight）读 kpt 时 detach K/V。
+
+**未接入 forward 的配置**（仅定义、grep 无使用）：`ki_gradient_scale`、`ki_kpt_gradient_scale`、`keypoint_noise_sigma`。
+
+### 43.4 `linear_attention` 层差异
+
+当 VLM 某层为 `layer_type == "linear_attention"` 时，三路 **各自独立** 跑 linear attn，**无** cross-path attention（L382–414）。在该层上，foresight 与 kpt **连 prefix 的 cross-path 都不通过 joint QKV 发生**（各路径仅自己的 hidden states）。full_attention 层才实现上表的段间规则。
+
+```mermaid
+flowchart TB
+  subgraph fullAttn [full_attention 层]
+    Pq[prefix_Q]
+    Kq[kpt_Q]
+    Aq[action_Q_includes_foresight]
+    Pkv[prefix_KV]
+    Kkv[kpt_KV]
+    Akv[action_KV]
+    Pq --> Pkv
+    Kq --> Pkv
+    Kq --> Kkv
+    Aq --> Pkv
+    Aq --> Kkv
+    Aq --> Akv
+  end
+```
+
+（无 `Kq --> Akv` 边 = kpt 不可见 foresight/action K/V。）
+
+---
+
+## 44. 训练 forward 与 loss 下的耦合
+
+### 44.1 同一步 forward 内的多任务 loss
+
+**[代码事实]** 在同一 `InternVLAA15.forward` 中并行计算：
+
+- \(\mathcal{L}_{\mathrm{action}}\)：suffix 末 `chunk_size` 个 token → flow matching MSE；
+- \(\mathcal{L}_{\mathrm{video}}\)：`get_learnable_token_output(suffix_out)` → WAN（正文 §3.5）；
+- \(\mathcal{L}_{\mathrm{kpt}}^{\mathrm{cur/fut}}\)：`get_keypoint_token_output(kpt_out)` → `keypoint_out_proj`（及 future 位置编码并行头，**不读 learnable 输出**）。
+
+kpt 重建路径核心片段：
+
+```1965:1986:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+            kpt_query_out = self.get_keypoint_token_output(kpt_out).to(dtype=torch.float32)
+            pred_kpt_current = self.keypoint_out_proj(kpt_query_out)
+            ...
+            future_kpt_tokens = kpt_query_out.unsqueeze(1) + future_pos[None, :, None, :]
+            future_kpt_pred = self.keypoint_out_proj(
+                future_kpt_tokens.reshape(B * chunk_size, j, -1)
+            ).reshape(B, chunk_size, j, kpt_dim)
+            loss_kpt_future = self._kpt_split_loss(future_kpt_pred, kpt_future, ...)
+```
+
+**结论**：即使 foresight 与 kpt 在同一次 forward 里计算，**loss 层面没有**「kpt 预测 ← latent foresight 隐变量」的接线；二者仅通过 **共享的 VLM prefix 表示** 与 **action 段对 kpt 的 attention（foresight 可读 kpt）** 间接相关。
+
+### 44.2 梯度在 foresight 参数上的分工
+
+在 **当前实现** 下，可训练 foresight 相关参数主要包括 `learnable_tokens`、`learnable_tokens_in_proj`、`learnable_to_wan_proj` 及 action expert 中与 suffix 相连的权重。梯度来源：
+
+| 参数 / 模块 | `loss_action` | `loss_video` | `loss_kpt` |
+|---|---|---|---|
+| `learnable_tokens` 等 foresight 通路 | 是（经 action suffix） | 是 | **否** |
+| `keypoint_expert` + TrackEncoder + kpt head | 否（除非 action 反传经 detach 关闭） | 否 | 是（`kpt_mask` 样本） |
+
+与正文 §3.5 梯度图一致；补充：**kptGrad 不进入 learnable_tokens**（除非未来改架构或打开 §47 方案）。
+
+Phase 1（`kpt_mask=false`）：`loss_kpt_*` 在 policy 层置 0，但 kpt expert 仍可能通过 action→kpt attention 获得 **间接** 梯度（`modeling_internvla_a1_5.py` 注释 L2497–2500；与 [paper_code_analyz.md §15.6](paper_code_analyz.md) 一致）。
+
+### 44.3 与 §3.6 关键点损失的关系
+
+正文 §3.6 的 \(\mathcal{L}_{\mathrm{kpt}}\) 公式仍成立；本附录强调：**该损失不会反向塑造 foresight token 的 WAN 语义**，也不会让 kpt query 直接 attend foresight。若实验上希望「几何预测与 latent 未来一致」，需要 §47 的显式结构或至少接受 **仅 VLM prefix 间接耦合** 的弱对齐。
+
+---
+
+## 45. 推理路径与训推语义
+
+### 45.1 `sample_actions` 的两阶段结构
+
+**[代码事实]** 标准推理（`predict_action_chunk` → `sample_actions`）：
+
+1. **VLM prefix** forward 一次，建 cache；
+2. 若 `enable_keypoint_predictor`：**kpt suffix 再 forward 一次**，把 kpt 段写入 **同一** `past_key_values`（约 L1338–1370）；
+3. **flow matching 循环**：每步 `denoise_step` 只传入 **action suffix** embedding，kpt 已在 cache 中。
+
+`denoise_step` 文档说明 action expert 所 attend 的已缓存长度为 prefix 或 `[prefix;kpt]`：
+
+```1427:1430:src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py
+            prefix_pad_masks: padding mask covering everything the action expert attends to
+                that is *already cached* in ``past_key_values`` — just the VLM prefix in the
+                2-path case, or ``[prefix; keypoint]`` when ``use_kpt=True``
+```
+
+denoise 时 3-path forward 的 embed 为 `[None, None, suffix_embs]`（L1455–1464）：**foresight 隐状态只在 denoise 迭代中演化**，不参与步骤 2 的 kpt cache 计算。
+
+### 45.2 训推含义
+
+| 阶段 | kpt 可见什么 | foresight 在哪 |
+|---|---|---|
+| 训练 joint forward | prefix + kpt suffix | action suffix 内，与 kpt **同一步** 但 kpt **不可见** foresight K/V |
+| 推理 step 2（kpt cache） | prefix + kpt suffix | 尚未进入 denoise，**无** 当前步 foresight 隐状态 |
+| 推理 denoise 循环 | cache 中 kpt K/V | suffix 内 foresight 每步更新 |
+
+因此：若在训练期增加 **kpt → foresight** attention（§47 方案 A），推理必须配套 **§47.5 的 E1–E4** 之一，否则会出现 **train–serve 语义分裂**。
+
+### 45.3 Optimized backend
+
+`modeling_internvla_a1_5_optimized.py` **无** keypoint 路径；且要求 `action_loss_only=True`（config 校验）。LIBERO eval 脚本注释说明 optimized **不接受** `his_kpts`。GeoPredict 融合 checkpoint 的闭环应用 **standard backend + 客户端 history**。
+
+---
+
+## 46. 与本文档其他章节的关系
+
+1. **§3.1 mermaid**：`kptExpert --> actionExpert` 表示 action expert **可以 attend kpt 段输出**（K/V），**不是** foresight ↔ kpt 双向边。foresight 与 kpt **无直接 MoT 边**（§43）。
+2. **§3.5 / §3.6**：video foresight 与 kpt 重建是 **并列 loss**；参数梯度在 foresight 与 kpt 模块上 **几乎不相交**（§44.2）。
+3. **§9 消融矩阵 [待验证]**：若实现 §47 方案，建议新增行，例如 `M-kpt-fore-A`（仅 kpt→learnable attend）、`M-kpt-fore-B`（+ kpt loss 到 foresight 的梯度控制）。
+4. **附录一 / 附录三（foresight 切片 P0）**：与 kpt–foresight 拓扑 **正交**；在 `get_learnable_token_output` 索引错误时，`loss_video` 监督可能污染 action token，但 **仍不改变** kpt 看不见 foresight 的段间规则。扩展方案应在 **切片正确** 的 standard backend 上评估。
+5. **paper_code_analyz.md §15**：数据层 kpt history/future 与 action chunk 对齐；本附录 **不重复** delta 索引，只补充 **模型内 attention**。
+
+---
+
+## 47. 扩展方案：kpt 显式依赖 latent foresight
+
+以下均为 **[待验证建议]**：未在仓库默认代码中实现；列出 **改动触点** 与 **训推契约** 供设计与消融使用。
+
+### 47.1 方案 A（首选）：kpt attend **仅 learnable 槽位**
+
+**思路**：在 `compute_layer_complete_3path` 的 kpt 分支，将 K/V 从 `[prefix, kpt]` 扩展为 `[prefix, kpt, learnable_keys]`，其中 learnable 对应 action 段中 **前 N 个 foresight 位置**（不含 action+time），2D mask 严格限制 kpt query **不可** attend flow-matching 噪声 token。
+
+**主要改动点**：`modeling_internvla_a1_5.py` — `compute_layer_complete_3path`（K/V concat + `kpt_attn_mask` 列范围）；构造全局 `attention_mask` 时保证列索引与 `embed_suffix` 布局一致（含 `tokenize_state` 下标偏移，建议与 `_suffix_state_len` 统一）。
+
+**训练行为**：\(\mathcal{L}_{\mathrm{kpt}}\) 梯度可进入 `learnable_tokens` / in_proj / action expert 中与 learnable 相连部分；与 \(\mathcal{L}_{\mathrm{video}}\) **共享** foresight 参数，需监控目标冲突。
+
+**推理配套**：见 §47.5（几乎必选 E1 或 E2）。
+
+**风险与消融**：优先看 `loss_video` 是否发散、LIBERO-Plus SR、foresight grad norm；对比 `kpt_to_action_detach` 开/关。
+
+**建议配置名**：`kpt_attend_learnable_tokens: bool`（文档级命名，非现有字段）。
+
+### 47.2 方案 B：A + 控制 kpt → foresight 梯度
+
+**思路**：在方案 A 基础上，对 kpt 分支使用的 learnable K/V 做 `detach()`，或引入 scale（概念上对应未接线的 `ki_kpt_gradient_scale`），实现 **foresight 读 kpt 双向** 但 **仅 video/action 损失** 更新 foresight，或按比例混合。
+
+**改动点**：同 A + 可选 config 接线。
+
+**适用**：担心 kpt 几何 loss 破坏 WAN 已蒸馏的 foresight 语义时。
+
+### 47.3 方案 C：Late fusion（不改 MoT 段间规则）
+
+**思路**：保持 §43 attention 不变；在 `InternVLAA15.forward` 的 kpt loss 段，取 `get_learnable_token_output(suffix_out)`，经 `Linear` 投到 kpt hidden，与 `kpt_query_out` 相加/拼接后再 `keypoint_out_proj`。
+
+**改动点**：`modeling_internvla_a1_5.py` forward 中 kpt loss 块；新增小投影层参数。
+
+**优点**：回归面小于改 3path kernel；易 A/B。
+
+**缺点**：非层内 multi-layer attention 互通；推理仍需 §47.5（suffix_out 在 denoise 后才稳定）。
+
+### 47.4 方案 D：kpt suffix 入口增加 foresight 条件 token
+
+**思路**：在 `embed_kpt_suffix` 增加 K 个 token，由 **静态** `learnable_tokens` 投影或 **上一步 cache 的 foresight 向量** 初始化；kpt 段内 self/block attn 消化这些 token。
+
+**缺点**：若只用参数 embedding 而非动态 latent，与「latent foresight」目标弱一致；动态 cache 需定义训练时如何采样时刻。
+
+### 47.5 推理配套策略（与 A/B/C 正交）
+
+| 编号 | 策略 | 含义 | 风险 |
+|---|---|---|---|
+| E1 | kpt 仅 attend **learnable 输入 embedding** | kpt cache 仍算一次；不依赖 denoise 后隐状态 | 与训练「 attend 深层 foresight」可能不一致 |
+| E2 | 每 env step 用固定 noise/time **跑 1 次** suffix，取 learnable out **再刷 kpt cache** | 语义较接近训练 | 额外一次 partial forward，延迟↑ |
+| E3 | kpt 移入 **每 denoise step** 联合 forward | 训推最一致 | 成本最高，颠覆「kpt 只算一次」注释 |
+| E4 | 训练用深层 foresight、部署用 E1 | 接受 gap | 需文档化契约 |
+
+### 47.6 不推荐作为第一步的改法
+
+- 全局重排为 `[prefix | learnable | kpt | action]`：动 position/cache/测试面极大；
+- 让 prefix attend action/foresight：破坏 VLM 隔离，伤 VQA/FAST；
+- kpt attend **完整** action suffix（含 action+time）：引入 flow 噪声，几何监督不稳定。
+
+```mermaid
+flowchart TB
+  subgraph current [当前代码 full_attention]
+    P[prefix]
+    K[kpt_suffix]
+    F[learnable_N]
+    A[action_time_C]
+    P --> K
+    K --> F
+    K --> A
+    P --> F
+    P --> A
+  end
+  K -.->|"方案A 新增"| F
+```
+
+---
+
+## 48. 验收与文档维护
+
+### 48.1 代码回归（实现任一 §47 方案后）
+
+- 现有：`tests/test_step2_attention_mask.py`、`tests/test_step5_forward_loss.py`、3-path dispatch 测试；
+- 建议新增：kpt query 对 learnable 列 mask 的 **可见/不可见** 断言；`tokenize_state` true/false 下标回归。
+
+### 48.2 效果验收 [待验证]
+
+- 训练：`loss_kpt_current`、`loss_kpt_future`、`loss_video`、`loss_action` 曲线；`learnable_tokens.grad` 范数；
+- 下游：标准 LIBERO + LIBERO-Plus SR（foresight 主要影响 OOD/动态，见正文 §1）；
+- 对照：方案 A 开/关、`kpt_to_action_detach` 开/关、E1 vs E2 推理。
+
+### 48.3 文档维护
+
+- 实现后更新本附录 §43–§45 的 **[代码事实]** 表（将「否」改为条件「是」并注明 config）；
+- 同步 [paper_code_analyz.md §15](paper_code_analyz.md) 或增 §16「kpt–foresight」短节，避免与策略文档分叉。
+
+### 48.4 附录四一句话总结
+
+**[代码事实]** 当前 keypoint expert **不能** 通过 attention 读取 Foresight tokens；Foresight（learnable）**可以** 读取 kpt（除非 detach）；WAN/video 监督 **只** 塑造 foresight，不经过 kpt head。**[待验证建议]** 若要让 kpt 显式依赖 latent foresight，优先 **方案 A（kpt 仅 attend learnable 槽位）+ 推理 E1/E2**，并单独做 video/kpt 目标冲突消融。
+
+---
+
+**出处（附录四）**：`src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5.py`（`compute_layer_complete_3path`、`embed_suffix`、`embed_kpt_suffix`、`forward`、`sample_actions`、`denoise_step`）；`src/lerobot/policies/internvla_a1_5/configuration_internvla_a1_5.py`；`src/lerobot/policies/internvla_a1_5/modeling_internvla_a1_5_optimized.py`；[paper_code_analyz.md §15](paper_code_analyz.md)。
